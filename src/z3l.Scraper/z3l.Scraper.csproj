@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>z3l.Scraper</RootNamespace>
+    <AssemblyName>z3l.Scraper</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>z3l.Scraper</PackageId>
+    <Version>0.1.0-preview.1</Version>
+    <Authors>z3l</Authors>
+    <Copyright>Copyright © 2026 z3l</Copyright>
+    <Description>Block-aware web scraping engine for .NET 9/10: request queue with priorities and de-duplication, retries with backoff, response validation (blocked, not found, incomplete pages), label routing, async handlers and streamed typed results. Pluggable page loaders (HttpClient built in). HTML is parsed with z3l.FastHtmlParser.</Description>
+    <PackageTags>scraper;web-scraping;webscraping;crawler;web-crawler;crawling;spider;scraping;html;parser;retry;proxy;dotnet;csharp;net9;net10</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="z3l.FastHtmlParser" Version="1.3.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="z3l.Scraper.Tests" />
+  </ItemGroup>
+
+</Project>
