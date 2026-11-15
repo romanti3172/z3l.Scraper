@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Globalization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using z3l.Scraper.Loading;
@@ -26,6 +28,12 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
     private readonly ConcurrentQueue<FailedRequest> _failed = new();
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _pending;
+    private int _accepted;
+    private int _limitLogged;
+
+    private readonly object _rateLock = new();
+    private readonly long _rateInterval;     // Stopwatch ticks between load starts, 0 for no limit
+    private long _nextRateSlot;
 
     private readonly Channel<TItem> _items;
 
@@ -39,6 +47,10 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
         });
+        if (_options.MaxRequestsPerMinute is { } perMinute)
+        {
+            _rateInterval = Stopwatch.Frequency * 60 / perMinute;
+        }
     }
 
     public ScraperStats Stats { get; } = new();
@@ -52,7 +64,8 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         Stats.Start();
         foreach (var request in startRequests)
         {
-            Enqueue(request);
+            ArgumentNullException.ThrowIfNull(request, nameof(startRequests));
+            Enqueue(request, fromHandler: false);
         }
         if (Volatile.Read(ref _pending) == 0) _drained.TrySetResult();
 
@@ -101,15 +114,23 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
 
     // ---------------------------------------------------------------- queue
 
-    /// <summary>Accepts a new request. False for a duplicate.</summary>
-    public bool Enqueue(ScrapeRequest request)
+    /// <summary>
+    /// Accepts a new request. False for a duplicate, over <see cref="ScraperOptions.MaxRequests"/>, or for a bad URL from a handler;
+    /// a bad start URL throws.
+    /// </summary>
+    public bool Enqueue(ScrapeRequest request, bool fromHandler)
     {
+        if (!UrlHelper.TryNormalize(request.Url, out var url))
+        {
+            if (fromHandler) return false;
+            throw new ArgumentException($"A start request needs an absolute http(s) URL: \"{request.Url}\"", nameof(request));
+        }
         if (_scraper.FindRoute(request.Label) == null)
         {
             throw new InvalidOperationException($"No handler for label \"{request.Label}\": register it with Route(\"{request.Label}\", handler) or add FallbackRoute");
         }
 
-        request = request with { Attempts = 0, NotFoundCount = 0 };   // own copy: the caller may reuse its instance
+        request = request with { Url = url, Attempts = 0, NotFoundCount = 0 };   // own copy: the caller may reuse its instance
 
         if (!request.SkipDuplicateCheck)
         {
@@ -122,6 +143,16 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
                     return false;
                 }
             }
+        }
+
+        if (_options.MaxRequests is { } max && Interlocked.Increment(ref _accepted) > max)
+        {
+            Stats.AddSkippedByLimit();
+            if (Interlocked.Exchange(ref _limitLogged, 1) == 0)
+            {
+                Logger.LogInformation("MaxRequests {MaxRequests} reached: new requests are skipped", max);
+            }
+            return false;
         }
 
         Interlocked.Increment(ref _pending);
@@ -168,9 +199,9 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             {
                 await ProcessAsync(request, token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            catch (Exception) when (token.IsCancellationRequested)
             {
-                return;     // the run is stopping, the request stays unfinished
+                return;     // the run is stopping: whatever the request threw, it stays unfinished
             }
             catch (Exception ex)
             {
@@ -186,6 +217,8 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
 
     private async Task ProcessAsync(ScrapeRequest request, CancellationToken token)
     {
+        await WaitForRateSlotAsync(token).ConfigureAwait(false);
+
         request.Attempts++;
         Stats.AddLoad();
 
@@ -202,16 +235,19 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
                            ?? throw new InvalidOperationException($"{_scraper.Loader.GetType().Name}.LoadAsync returned null");
                 verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
             }
+            catch (NonRetryableException ex) when (!token.IsCancellationRequested)
+            {
+                Fail(request, FailureReason.NonRetryable, ex.Message, response?.StatusCode, ex);
+                return;
+            }
             catch (Exception ex) when (!token.IsCancellationRequested)
             {
                 loadError = ex;
                 verdict = ex is OperationCanceledException
-                    ? ValidationResult.Retry($"timeout after {_options.RequestTimeout}")
+                    ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
                     : ValidationResult.Retry($"load error: {ex.Message}");
             }
         }
-
-        var status = response?.StatusCode;
 
         switch (verdict.Outcome)
         {
@@ -223,27 +259,21 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
                 request.NotFoundCount++;
                 if (request.NotFoundCount <= _options.NotFoundRetries)
                 {
-                    ScheduleRetry(request, verdict.Reason!);
+                    ScheduleRetry(request, verdict.Reason!, null);
                 }
                 else
                 {
-                    Stats.AddNotFound();
-                    Fail(request, FailureReason.NotFound, verdict.Reason!, status, null);
+                    Fail(request, FailureReason.NotFound, verdict.Reason!, response?.StatusCode, null);
                 }
                 break;
 
             case ValidationOutcome.Blocked:
-                Stats.AddBlocked();
-                if (_scraper.Loader is IBlockAwarePageLoader blockAware && response != null)
-                {
-                    try { blockAware.ReportBlocked(request, response, verdict.Reason!); }
-                    catch (Exception ex) { Logger.LogError(ex, "ReportBlocked threw"); }
-                }
-                RetryOrFail(request, $"blocked: {verdict.Reason}", status, null);
+                ReportBlocked(request, response, verdict.Reason!);
+                RetryOrFail(request, $"blocked: {verdict.Reason}", response, null);
                 break;
 
             default:
-                RetryOrFail(request, verdict.Reason!, status, loadError);
+                RetryOrFail(request, verdict.Reason!, response, loadError);
                 break;
         }
     }
@@ -252,45 +282,86 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
     {
         var handler = _scraper.FindRoute(request.Label)!;
         var context = new ScrapeContext<TItem>(this, request, response, token);
+        List<TItem>? items;
         try
         {
             await handler(context).ConfigureAwait(false);
+            items = context.Complete();
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
         {
-            Logger.LogWarning(ex, "Handler \"{Label}\" failed on {Url}", request.Label, request.Url);
-            if (_options.RetryOnHandlerError)
+            context.Complete();     // items of a failed handler are dropped: the page is retried or failed as a whole
+            switch (ex)
             {
-                RetryOrFail(request, $"handler error: {ex.Message}", response.StatusCode, ex, FailureReason.HandlerError);
-            }
-            else
-            {
-                Fail(request, FailureReason.HandlerError, ex.Message, response.StatusCode, ex);
+                case RetryRequestException retry:
+                    if (retry.Blocked) ReportBlocked(request, response, retry.Message);
+                    RetryOrFail(request, $"handler asked to retry: {retry.Message}", response, retry);
+                    break;
+                case NonRetryableException nonRetryable:
+                    Fail(request, FailureReason.NonRetryable, nonRetryable.Message, response.StatusCode, nonRetryable);
+                    break;
+                default:
+                    if (_options.RetryOnHandlerError)
+                    {
+                        Logger.LogDebug(ex, "Handler \"{Label}\" failed on {Url}", request.Label, request.Url);
+                        RetryOrFail(request, $"handler error: {ex.Message}", response, ex, FailureReason.HandlerError);
+                    }
+                    else
+                    {
+                        Fail(request, FailureReason.HandlerError, ex.Message, response.StatusCode, ex);
+                    }
+                    break;
             }
             return;
+        }
+
+        if (items != null)
+        {
+            foreach (var item in items)
+            {
+                await _items.Writer.WriteAsync(item, token).ConfigureAwait(false);
+                Stats.AddItem();
+            }
         }
 
         Stats.AddSucceeded();
         Finish();
     }
 
-    private void RetryOrFail(ScrapeRequest request, string reason, int? status, Exception? error, FailureReason reasonWhenOut = FailureReason.RetriesExhausted)
+    private void ReportBlocked(ScrapeRequest request, PageResponse? response, string reason)
+    {
+        Stats.AddBlocked();
+        if (_scraper.Loader is IBlockAwarePageLoader blockAware && response != null)
+        {
+            try { blockAware.ReportBlocked(request, response, reason); }
+            catch (Exception ex) { Logger.LogError(ex, "ReportBlocked threw"); }
+        }
+    }
+
+    private void RetryOrFail(ScrapeRequest request, string reason, PageResponse? response, Exception? error, FailureReason reasonWhenOut = FailureReason.RetriesExhausted)
     {
         var maxRetries = request.MaxRetries ?? _options.MaxRetries;
         if (request.Attempts <= maxRetries)
         {
-            ScheduleRetry(request, reason);
+            ScheduleRetry(request, reason, RetryAfter(response));
         }
         else
         {
-            Fail(request, reasonWhenOut, $"{request.Attempts} attempts, last: {reason}", status, error);
+            Fail(request, reasonWhenOut, $"{request.Attempts} attempts, last: {reason}", response?.StatusCode, error);
         }
     }
 
-    private void ScheduleRetry(ScrapeRequest request, string reason)
+    private void ScheduleRetry(ScrapeRequest request, string reason, TimeSpan? retryAfter)
     {
         Stats.AddRetry();
+
         var delay = RetryDelay(request.Attempts);
+        if (retryAfter is { } serverDelay)
+        {
+            // the server knows best, within MaxRetryDelay
+            var capped = serverDelay < _options.MaxRetryDelay ? serverDelay : _options.MaxRetryDelay;
+            if (capped > delay) delay = capped;
+        }
         Logger.LogDebug("Retry {Attempt} of {Url} in {DelayMs} ms: {Reason}", request.Attempts, request.Url, (int)delay.TotalMilliseconds, reason);
 
         if (delay <= TimeSpan.Zero)
@@ -299,8 +370,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             return;
         }
 
-        var token = _stop.Token;
-        _ = Task.Delay(delay, token).ContinueWith(
+        _ = Task.Delay(delay, _stop.Token).ContinueWith(
             static (task, state) => { if (task.IsCompletedSuccessfully) ((Action)state!)(); },
             () => Push(request),
             CancellationToken.None,
@@ -318,23 +388,55 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         return TimeSpan.FromMilliseconds(ms);
     }
 
+    /// <summary>Retry-After header: seconds or an HTTP date.</summary>
+    internal static TimeSpan? RetryAfter(PageResponse? response)
+    {
+        if (response == null || !response.Headers.TryGetValue("Retry-After", out var value) || string.IsNullOrWhiteSpace(value)) return null;
+
+        value = value.Trim();
+        if (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)) return TimeSpan.FromSeconds(seconds);
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date))
+        {
+            var wait = date - DateTimeOffset.UtcNow;
+            return wait > TimeSpan.Zero ? wait : TimeSpan.Zero;
+        }
+        return null;
+    }
+
+    /// <summary>Keeps loads <see cref="ScraperOptions.MaxRequestsPerMinute"/> apart: each load takes the next free slot.</summary>
+    private Task WaitForRateSlotAsync(CancellationToken token)
+    {
+        if (_rateInterval == 0) return Task.CompletedTask;
+
+        long wait;
+        lock (_rateLock)
+        {
+            var now = Stopwatch.GetTimestamp();
+            var slot = Math.Max(now, _nextRateSlot);
+            _nextRateSlot = slot + _rateInterval;
+            wait = slot - now;
+        }
+        return wait <= 0 ? Task.CompletedTask : Task.Delay(Stopwatch.GetElapsedTime(0, wait), token);
+    }
+
     private void Fail(ScrapeRequest request, FailureReason reason, string message, int? status, Exception? error)
     {
         Stats.AddFailed();
+        if (reason == FailureReason.NotFound) Stats.AddNotFound();
+
         var failed = new FailedRequest(request, reason, message, status, error);
         _failed.Enqueue(failed);
-        Logger.LogWarning("Failed {Url} ({Label}): {Reason}, {Message}", request.Url, request.Label, reason, message);
+
+        // a missing page is usual business; a handler error needs its stack trace
+        var level = reason == FailureReason.NotFound ? LogLevel.Information : LogLevel.Warning;
+        Logger.Log(level, reason == FailureReason.HandlerError ? error : null,
+            "Failed {Url} ({Label}): {Reason}, {Message}", request.Url, request.Label, reason, message);
+
         _scraper.RaiseRequestFailed(failed);
         Finish();
     }
 
     private EffectiveRules GetRules(string label) => _rules.GetOrAdd(label, _options.Rules.Build);
-
-    public async ValueTask EmitAsync(TItem item, CancellationToken token)
-    {
-        await _items.Writer.WriteAsync(item, token).ConfigureAwait(false);
-        Stats.AddItem();
-    }
 
     private async Task ProgressAsync(CancellationToken token)
     {

@@ -29,12 +29,27 @@ public sealed class ScraperOptions
     /// <summary>Stop after this time and return what was scraped. Null for no limit.</summary>
     public TimeSpan? MaxRunDuration { get; set; }
 
-    /// <summary>Retry the request when the handler throws (by default the request fails at once).</summary>
+    /// <summary>
+    /// Accept at most this many requests in a run (start requests included); later ones are skipped and counted in
+    /// <see cref="ScraperStats.SkippedByLimit"/>. Handy for trying the selectors on the first pages of a big site. Null for no limit.
+    /// </summary>
+    public int? MaxRequests { get; set; }
+
+    /// <summary>
+    /// Spreads the loads evenly: at most this many loads (retries included) start per minute, whatever
+    /// <see cref="MaxConcurrency"/> is. Null for no limit.
+    /// </summary>
+    public int? MaxRequestsPerMinute { get; set; }
+
+    /// <summary>
+    /// Retry the request when the handler throws (by default the request fails at once).
+    /// <see cref="RetryRequestException"/> is always retried and <see cref="NonRetryableException"/> never is.
+    /// </summary>
     public bool RetryOnHandlerError { get; set; }
 
     /// <summary>
-    /// Items the consumer has not taken yet; when the buffer is full, handlers wait in <c>EmitAsync</c>
-    /// so a slow consumer slows the scraping down instead of filling the memory.
+    /// Items the consumer has not taken yet; when the buffer is full, workers wait before handing over more
+    /// items, so a slow consumer slows the scraping down instead of filling the memory.
     /// </summary>
     public int ItemBufferSize { get; set; } = 1000;
 
@@ -52,5 +67,16 @@ public sealed class ScraperOptions
         if (ItemBufferSize < 1) throw new ArgumentOutOfRangeException(nameof(ItemBufferSize), ItemBufferSize, "Must be 1 or more");
         if (RetryBackoffFactor < 1) throw new ArgumentOutOfRangeException(nameof(RetryBackoffFactor), RetryBackoffFactor, "Must be 1 or more");
         if (RetryDelay < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(RetryDelay), RetryDelay, "Must not be negative");
+        if (MaxRetryDelay < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxRetryDelay), MaxRetryDelay, "Must not be negative");
+        if (RequestTimeout <= TimeSpan.Zero && RequestTimeout != Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(nameof(RequestTimeout), RequestTimeout, "Must be positive or Timeout.InfiniteTimeSpan");
+        }
+        if (MaxRunDuration is { } duration && (duration <= TimeSpan.Zero || duration.TotalMilliseconds > int.MaxValue))
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxRunDuration), duration, "Must be positive and under 24 days");
+        }
+        if (MaxRequests is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequests), MaxRequests, "Must be 1 or more");
+        if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
     }
 }

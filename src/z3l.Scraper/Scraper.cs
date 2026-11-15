@@ -14,19 +14,19 @@ namespace z3l.Scraper;
 /// <code>
 /// using var loader = new HttpPageLoader();
 /// var scraper = new Scraper&lt;Product&gt;(loader)
-///     .Route("list", async ctx =&gt;
+///     .Route("list", ctx =&gt;
 ///     {
 ///         ctx.Enqueue(ctx.Html.XPathValues("//a[@class='product']/@href"), "product");
 ///         ctx.Enqueue(ctx.Html.XPathValue("//a[@rel='next']/@href"), "list");
 ///     })
-///     .Route("product", async ctx =&gt;
-///         await ctx.EmitAsync(new Product(ctx.Html.XPathValue("//h1"), ctx.Request.Url)));
+///     .Route("product", ctx =&gt;
+///         ctx.Emit(new Product(ctx.Html.XPathValue("//h1"), ctx.Request.Url)));
 ///
 /// await foreach (var product in scraper.RunAsync(new ScrapeRequest("https://shop.example/catalog", "list")))
 ///     Console.WriteLine(product);
 /// </code>
 /// </example>
-public class Scraper<TItem>
+public sealed class Scraper<TItem>
 {
     private readonly Dictionary<string, Func<ScrapeContext<TItem>, Task>> _routes = new(StringComparer.OrdinalIgnoreCase);
     private Func<ScrapeContext<TItem>, Task>? _fallbackRoute;
@@ -90,9 +90,10 @@ public class Scraper<TItem>
     /// is handled or failed, or when <see cref="ScraperOptions.MaxRunDuration"/> passes.
     /// Stopping the enumeration stops the run.
     /// </summary>
-    /// <param name="startRequests">First pages; strings convert to requests with the default label.</param>
+    /// <param name="startRequests">First pages (absolute http(s) URLs); strings convert to requests with the default label.</param>
     /// <param name="cancellationToken">Cancels the run; the enumeration then throws <see cref="OperationCanceledException"/>.</param>
     /// <exception cref="InvalidOperationException">No handler for a label, or the scraper is already running.</exception>
+    /// <exception cref="ArgumentException">A start request URL is not an absolute http(s) URL.</exception>
     public async IAsyncEnumerable<TItem> RunAsync(IEnumerable<ScrapeRequest> startRequests, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(startRequests);

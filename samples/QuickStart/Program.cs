@@ -34,16 +34,16 @@ var scraper = new Scraper<Book>(loader, options, loggerFactory.CreateLogger("scr
             ctx.Enqueue(ctx.Html.XPathValue("//li[@class='next']/a/@href"), "list", userData: page + 1);
         }
     })
-    .Route("book", async ctx =>
+    .Route("book", ctx =>
     {
         var html = ctx.Html;
-        await ctx.EmitAsync(new Book(
+        ctx.Emit(new Book(
             Title: html.Find(HtmlTag.H1).Text(),
             Price: html.Find(HtmlTag.P, cls: "price_color").Text(),
             Url: ctx.Request.Url));
     });
 
-scraper.RequestFailed += failed => Console.WriteLine($"FAILED {failed.Request.Url}: {failed.Reason}, {failed.Message}");
+// failures are in the log; scraper.RequestFailed gives them to your code as well
 
 var start = new[]
 {

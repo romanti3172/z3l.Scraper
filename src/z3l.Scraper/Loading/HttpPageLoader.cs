@@ -17,13 +17,13 @@ public sealed class HttpPageLoaderOptions
         ["Accept-Language"] = "en-US,en;q=0.9",
     };
 
-    /// <summary>Proxy for all requests.</summary>
+    /// <summary>Proxy for all requests; when null the system proxy settings are used.</summary>
     public IWebProxy? Proxy { get; set; }
 
     /// <summary>Keep cookies between requests (one cookie jar for the loader).</summary>
     public bool UseCookies { get; set; } = true;
 
-    /// <summary>Largest body to read; bigger responses throw and are retried. 0 means no limit.</summary>
+    /// <summary>Largest body to read; a bigger response fails the request without retries. 0 means no limit.</summary>
     public long MaxResponseBytes { get; set; } = 50 * 1024 * 1024;
 }
 
@@ -42,11 +42,13 @@ public sealed class HttpPageLoader : IPageLoader, IDisposable
         {
             AutomaticDecompression = DecompressionMethods.All,
             UseCookies = _options.UseCookies,
-            Proxy = _options.Proxy,
-            UseProxy = _options.Proxy != null,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             AllowAutoRedirect = true,
         };
+        if (_options.Proxy != null)
+        {
+            handler.Proxy = _options.Proxy;     // without it the system proxy (HTTP_PROXY, Windows settings) is used
+        }
         _client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };   // the scraper applies RequestTimeout
         _ownsClient = true;
     }
@@ -62,12 +64,22 @@ public sealed class HttpPageLoader : IPageLoader, IDisposable
     /// <inheritdoc />
     public async Task<PageResponse> LoadAsync(ScrapeRequest request, CancellationToken cancellationToken)
     {
-        using var message = new HttpRequestMessage(request.Method, request.Url);
+        if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new NonRetryableException($"Not an http(s) URL: \"{request.Url}\"");
+        }
+
+        using var message = new HttpRequestMessage(request.Method, uri);
 
         if (request.Body != null)
         {
+            var contentType = request.ContentType ?? "application/x-www-form-urlencoded";
+            if (!MediaTypeHeaderValue.TryParse(contentType, out var mediaType))
+            {
+                throw new NonRetryableException($"Bad ContentType \"{contentType}\"");
+            }
             message.Content = new StringContent(request.Body);
-            message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(request.ContentType ?? "application/x-www-form-urlencoded");
+            message.Content.Headers.ContentType = mediaType;
         }
 
         message.Headers.TryAddWithoutValidation("User-Agent", _options.UserAgent);
@@ -81,7 +93,7 @@ public sealed class HttpPageLoader : IPageLoader, IDisposable
 
         if (_options.MaxResponseBytes > 0 && response.Content.Headers.ContentLength > _options.MaxResponseBytes)
         {
-            throw new HttpRequestException($"Response is {response.Content.Headers.ContentLength} bytes, more than MaxResponseBytes {_options.MaxResponseBytes}");
+            throw new NonRetryableException($"Response is {response.Content.Headers.ContentLength} bytes, more than MaxResponseBytes {_options.MaxResponseBytes}");
         }
 
         var body = await ReadBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
@@ -107,7 +119,7 @@ public sealed class HttpPageLoader : IPageLoader, IDisposable
             buffer.Write(chunk, 0, read);
             if (buffer.Length > _options.MaxResponseBytes)
             {
-                throw new HttpRequestException($"Response is more than MaxResponseBytes {_options.MaxResponseBytes}");
+                throw new NonRetryableException($"Response is more than MaxResponseBytes {_options.MaxResponseBytes}");
             }
         }
         return buffer.ToArray();

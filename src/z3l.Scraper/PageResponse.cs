@@ -53,8 +53,8 @@ public sealed partial class PageResponse
     public bool IsSuccessStatusCode => StatusCode is >= 200 and < 300;
 
     /// <summary>
-    /// Body decoded as text: the charset from Content-Type, then from &lt;meta charset&gt;, then UTF-8.
-    /// Decoded once on first use.
+    /// Body decoded as text, the way browsers do it: a byte order mark, then the charset from Content-Type,
+    /// then &lt;meta charset&gt; or the XML declaration (HTML and XML only), then UTF-8. Decoded once on first use.
     /// </summary>
     public string Text => _text ??= Decode();
 
@@ -64,21 +64,53 @@ public sealed partial class PageResponse
     {
         if (Body.Length == 0) return string.Empty;
 
-        var encoding = GetEncoding(CharsetFromContentType(ContentType)) ?? GetEncoding(CharsetFromMeta(Body)) ?? Encoding.UTF8;
+        var span = Body.AsSpan();
+        if (span.StartsWith(Encoding.UTF8.Preamble)) return Encoding.UTF8.GetString(span[3..]);
+        if (span.StartsWith(Encoding.Unicode.Preamble)) return Encoding.Unicode.GetString(span[2..]);
+        if (span.StartsWith(Encoding.BigEndianUnicode.Preamble)) return Encoding.BigEndianUnicode.GetString(span[2..]);
 
-        // BOM wins over the declared charset
-        var bomLength = 0;
-        if (Body.AsSpan().StartsWith(Encoding.UTF8.Preamble)) { encoding = Encoding.UTF8; bomLength = 3; }
-
-        return encoding.GetString(Body, bomLength, Body.Length - bomLength);
+        var encoding = GetEncoding(CharsetFromContentType(ContentType))
+                       ?? (IsMarkup(ContentType) ? GetEncoding(CharsetFromMarkup(Body)) : null)
+                       ?? Encoding.UTF8;
+        return encoding.GetString(Body);
     }
 
-    private static Encoding? GetEncoding(string? charset)
+    /// <summary>Finds an encoding by its label; labels that .NET does not know but sites use are mapped first.</summary>
+    internal static Encoding? GetEncoding(string? charset)
     {
         if (string.IsNullOrWhiteSpace(charset)) return null;
-        try { return Encoding.GetEncoding(charset.Trim().Trim('"', '\'')); }
+
+        var name = charset.Trim().Trim('"', '\'');
+        if (Aliases.TryGetValue(name, out var alias)) name = alias;
+
+        try { return Encoding.GetEncoding(name); }
         catch (ArgumentException) { return null; }
     }
+
+    private static readonly Dictionary<string, string> Aliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["utf8"] = "utf-8",
+        ["cp1251"] = "windows-1251",
+        ["cp-1251"] = "windows-1251",
+        ["win-1251"] = "windows-1251",
+        ["win1251"] = "windows-1251",
+        ["windows1251"] = "windows-1251",
+        ["x-cp1251"] = "windows-1251",
+        ["cp1252"] = "windows-1252",
+        ["win-1252"] = "windows-1252",
+        // browsers decode these as windows-1252 (WHATWG Encoding Standard): 0x80 is "€", not a control character
+        ["iso-8859-1"] = "windows-1252",
+        ["iso8859-1"] = "windows-1252",
+        ["latin1"] = "windows-1252",
+        ["l1"] = "windows-1252",
+        ["ascii"] = "windows-1252",
+        ["us-ascii"] = "windows-1252",
+    };
+
+    private static bool IsMarkup(string? contentType) =>
+        contentType is null
+        || contentType.Contains("html", StringComparison.OrdinalIgnoreCase)
+        || contentType.Contains("xml", StringComparison.OrdinalIgnoreCase);
 
     private static string? CharsetFromContentType(string? contentType)
     {
@@ -87,13 +119,16 @@ public sealed partial class PageResponse
         return match.Success ? match.Groups[1].Value : null;
     }
 
-    private static string? CharsetFromMeta(byte[] body)
+    private static string? CharsetFromMarkup(byte[] body)
     {
         var head = Encoding.ASCII.GetString(body, 0, Math.Min(body.Length, 2048));
-        var match = CharsetRegex().Match(head);
+        var match = head.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase) ? XmlEncodingRegex().Match(head) : CharsetRegex().Match(head);
         return match.Success ? match.Groups[1].Value : null;
     }
 
     [GeneratedRegex("""charset\s*=\s*["']?([\w\-:.]+)""", RegexOptions.IgnoreCase)]
     private static partial Regex CharsetRegex();
+
+    [GeneratedRegex("""^<\?xml[^>]*?encoding\s*=\s*["']([\w\-:.]+)""", RegexOptions.IgnoreCase)]
+    private static partial Regex XmlEncodingRegex();
 }
