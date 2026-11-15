@@ -65,7 +65,7 @@ public sealed class UrlTests
         // the loader answers for /start as if it was redirected to /cat/list
         var loader = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url.EndsWith("/start") ? Base : r.Url, ScraperTests.Html("x"))));
         var added = new List<bool>();
-        var scraper = new Scraper<string>(loader, ScraperTests.FastOptions())
+        var scraper = new Scraper(loader, ScraperTests.FastOptions())
             .Route("default", ctx =>
             {
                 if (!ctx.Request.Url.EndsWith("/start")) return;

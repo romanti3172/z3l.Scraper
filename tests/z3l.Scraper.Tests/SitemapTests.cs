@@ -110,7 +110,7 @@ public sealed class SitemapTests
         var loader = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, pages.GetValueOrDefault(r.Url) ?? "<html>product</html>", "application/xml")));
         var since = new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-        var scraper = new Scraper<string>(loader, ScraperTests.FastOptions())
+        var scraper = new Scraper(loader, ScraperTests.FastOptions())
             .Route("sitemap", ctx => ctx.EnqueueSitemap("product", filter: page => page.LastModified is null || page.LastModified > since))
             .Route("product", ctx => ctx.Emit(ctx.Request.Url));
 

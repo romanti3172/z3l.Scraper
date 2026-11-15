@@ -75,13 +75,20 @@ public sealed class ScraperOptions
     /// the next one, so save each item in the loop body. Pages in work or not taken when the process died are done again, so
     /// their items can come twice (at least once, never lost). <c>RunToListAsync</c> keeps the items in memory: a crash loses them.
     /// </para>
-    /// With a state file, <see cref="ScrapeRequest.UserData"/> must be a string, a number, a bool, a Guid, a DateTime,
-    /// a DateTimeOffset or a JsonElement. Null: no state is kept.
+    /// With a state file, <see cref="ScrapeRequest.Data"/> must be a plain value (a string, a number, a bool, a Guid, a DateTime,
+    /// a DateTimeOffset, a JsonElement) or the data of a typed handler, saved with <see cref="StateJson"/>. Null: no state is kept.
     /// </summary>
     public string? StatePath { get; set; }
 
     /// <summary>How often the state file is written while the run goes.</summary>
     public TimeSpan StateSaveInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How the data of typed handlers (<c>Route&lt;TData&gt;</c>) is saved in the state file: a <c>JsonSerializerContext</c> with your
+    /// data types (trimming and AOT safe), or <c>new DefaultJsonTypeInfoResolver()</c> (reflection) in an app that is not trimmed.
+    /// Needed only with <see cref="StatePath"/> and typed data; plain values (strings, numbers...) need nothing.
+    /// </summary>
+    public System.Text.Json.Serialization.Metadata.IJsonTypeInfoResolver? StateJson { get; set; }
 
     /// <summary>
     /// Retry the request when the handler throws (by default the request fails at once).

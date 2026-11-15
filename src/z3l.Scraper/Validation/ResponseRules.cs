@@ -71,19 +71,28 @@ public sealed class ResponseRulesCollection
         BlockedStatusCodes = { 403, 429 },
     };
 
-    /// <summary>Rules for one label, created on first use.</summary>
-    public ResponseRules this[string label]
+    /// <summary>Rules for one label (a <see cref="PageType"/> or a string), created on first use.</summary>
+    public ResponseRules this[ScrapeLabel label]
     {
         get
         {
-            if (!_byLabel.TryGetValue(label, out var rules))
+            if (!_byLabel.TryGetValue(label.Name, out var rules))
             {
                 rules = new ResponseRules();
-                _byLabel[label] = rules;
+                _byLabel[label.Name] = rules;
             }
             return rules;
         }
     }
+
+    /// <summary>
+    /// What a page type is checked as when its own rules do not say: a file is binary, an API answers JSON.
+    /// This beats <see cref="Default"/>, so <c>Default.Content = Html</c> does not break files.
+    /// </summary>
+    private static ExpectedContent? ContentOfPageType(string label) =>
+        label.Equals(nameof(PageType.File), StringComparison.OrdinalIgnoreCase) ? ExpectedContent.Binary
+        : label.Equals(nameof(PageType.Api), StringComparison.OrdinalIgnoreCase) ? ExpectedContent.Json
+        : null;
 
     internal EffectiveRules Build(string label)
     {
@@ -95,7 +104,7 @@ public sealed class ResponseRulesCollection
 
         return new EffectiveRules(
             RequireSuccessStatus: own?.RequireSuccessStatus ?? d.RequireSuccessStatus ?? true,
-            Content: own?.Content ?? d.Content ?? ExpectedContent.Any,
+            Content: own?.Content ?? ContentOfPageType(label) ?? d.Content ?? ExpectedContent.Any,
             AllowEmptyBody: own?.AllowEmptyBody ?? d.AllowEmptyBody ?? false,
             NotFoundOnStatus404: own?.NotFoundOnStatus404 ?? d.NotFoundOnStatus404 ?? true,
             MustContain: Merge(d.MustContain, own?.MustContain),

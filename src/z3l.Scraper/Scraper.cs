@@ -5,33 +5,37 @@ using z3l.Scraper.Loading;
 
 namespace z3l.Scraper;
 
+/// <summary>A registered handler and the type of data it takes (null: it takes none).</summary>
+internal sealed record ScrapeRoute(Func<ScrapeContext, Task> Handler, Type? DataType);
+
 /// <summary>
 /// Scrapes pages: takes requests from a queue, loads them, checks the responses, retries the bad ones
-/// and passes the good ones to the handler registered for the request label. Handlers queue more pages and emit items.
+/// and passes the good ones to the handler registered for the request label. Handlers queue more pages and emit items
+/// of any type.
 /// </summary>
-/// <typeparam name="TItem">Type of the scraped items; use a base type or <see cref="object"/> for several kinds.</typeparam>
 /// <example>
 /// <code>
 /// using var loader = new HttpPageLoader();
-/// var scraper = new Scraper&lt;Product&gt;(loader)
-///     .Route("list", ctx =&gt;
+/// var scraper = new Scraper(loader)
+///     .Route(PageType.Listing, ctx =&gt;
 ///     {
-///         ctx.Enqueue(ctx.Html.XPathValues("//a[@class='product']/@href"), "product");
-///         ctx.Enqueue(ctx.Html.XPathValue("//a[@rel='next']/@href"), "list");
+///         foreach (var card in ctx.Html.FindAll(HtmlTag.Div, cls: "card"))
+///             ctx.Enqueue(card.Find(HtmlTag.A).AttributeHref(), PageType.Item, new Teaser(card.Find(HtmlTag.Span).Text()));
+///         ctx.Enqueue(ctx.Html.XPathValue("//a[@rel='next']/@href"), PageType.Listing);
 ///     })
-///     .Route("product", ctx =&gt;
-///         ctx.Emit(new Product(ctx.Html.XPathValue("//h1"), ctx.Request.Url)));
+///     .Route&lt;Teaser&gt;(PageType.Item, (ctx, teaser) =&gt;
+///         ctx.Emit(new Product(ctx.Html.XPathValue("//h1"), teaser.Price)));
 ///
-/// await foreach (var product in scraper.RunAsync(new ScrapeRequest("https://shop.example/catalog", "list")))
-///     Console.WriteLine(product);
+/// await foreach (var item in scraper.RunAsync(new ScrapeRequest("https://shop.example/catalog", PageType.Listing)))
+///     if (item is Product product) Console.WriteLine(product);
 /// </code>
 /// </example>
-public sealed class Scraper<TItem>
+public sealed class Scraper
 {
-    private readonly Dictionary<string, Func<ScrapeContext<TItem>, Task>> _routes = new(StringComparer.OrdinalIgnoreCase);
-    private Func<ScrapeContext<TItem>, Task>? _fallbackRoute;
+    private readonly Dictionary<string, ScrapeRoute> _routes = new(StringComparer.OrdinalIgnoreCase);
+    private ScrapeRoute? _fallbackRoute;
     private int _running;
-    private ScraperRun<TItem>? _lastRun;
+    private ScraperRun? _lastRun;
 
     /// <summary>Creates a scraper.</summary>
     /// <param name="loader">Loads the pages, for example <see cref="HttpPageLoader"/>.</param>
@@ -59,29 +63,61 @@ public sealed class Scraper<TItem>
     /// <summary>Called for every request that fails (after its retries). Called from worker threads.</summary>
     public event Action<FailedRequest>? RequestFailed;
 
-    /// <summary>Registers the handler of a label (labels ignore case). Returns this scraper for chaining.</summary>
-    public Scraper<TItem> Route(string label, Func<ScrapeContext<TItem>, Task> handler)
+    /// <summary>Registers the handler of a label: a <see cref="PageType"/> or a string (labels ignore case). Returns this scraper.</summary>
+    public Scraper Route(ScrapeLabel label, Func<ScrapeContext, Task> handler)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(label);
         ArgumentNullException.ThrowIfNull(handler);
-        ThrowIfRunning();
-        _routes[label] = handler;
-        return this;
+        return Register(label, new ScrapeRoute(handler, null));
     }
 
     /// <summary>Registers a synchronous handler of a label.</summary>
-    public Scraper<TItem> Route(string label, Action<ScrapeContext<TItem>> handler)
+    public Scraper Route(ScrapeLabel label, Action<ScrapeContext> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
         return Route(label, ctx => { handler(ctx); return Task.CompletedTask; });
     }
 
+    /// <summary>
+    /// Registers the handler of a label whose requests carry data of type <typeparamref name="TData"/>
+    /// (queued with <see cref="ScrapeContext.Enqueue{TData}(string?, ScrapeLabel, TData, ScrapePriority)"/>);
+    /// the handler gets the data typed. A request of this label without such data is an error.
+    /// </summary>
+    public Scraper Route<TData>(ScrapeLabel label, Func<ScrapeContext, TData, Task> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        var name = label.Name;
+        return Register(label, new ScrapeRoute(
+            ctx => ctx.Request.Data is TData data ? handler(ctx, data) : throw WrongData(name, typeof(TData), ctx.Request.Data),
+            typeof(TData)));
+    }
+
+    /// <summary>Registers a synchronous handler of a label whose requests carry data of type <typeparamref name="TData"/>.</summary>
+    public Scraper Route<TData>(ScrapeLabel label, Action<ScrapeContext, TData> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        return Route<TData>(label, (ctx, data) => { handler(ctx, data); return Task.CompletedTask; });
+    }
+
     /// <summary>Registers the handler of requests whose label has no handler of its own.</summary>
-    public Scraper<TItem> FallbackRoute(Func<ScrapeContext<TItem>, Task> handler)
+    public Scraper FallbackRoute(Func<ScrapeContext, Task> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
         ThrowIfRunning();
-        _fallbackRoute = handler;
+        _fallbackRoute = new ScrapeRoute(handler, null);
+        return this;
+    }
+
+    /// <summary>Registers a synchronous handler of requests whose label has no handler of its own.</summary>
+    public Scraper FallbackRoute(Action<ScrapeContext> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        return FallbackRoute(ctx => { handler(ctx); return Task.CompletedTask; });
+    }
+
+    private Scraper Register(ScrapeLabel label, ScrapeRoute route)
+    {
+        ThrowIfRunning();
+        _routes[label.Name] = route;
         return this;
     }
 
@@ -92,9 +128,9 @@ public sealed class Scraper<TItem>
     /// </summary>
     /// <param name="startRequests">First pages (absolute http(s) URLs); strings convert to requests with the default label.</param>
     /// <param name="cancellationToken">Cancels the run; the enumeration then throws <see cref="OperationCanceledException"/>.</param>
-    /// <exception cref="InvalidOperationException">No handler for a label, or the scraper is already running.</exception>
+    /// <exception cref="InvalidOperationException">No handler for a label, wrong data for a typed handler, or the scraper is already running.</exception>
     /// <exception cref="ArgumentException">A start request URL is not an absolute http(s) URL.</exception>
-    public async IAsyncEnumerable<TItem> RunAsync(IEnumerable<ScrapeRequest> startRequests, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    public async IAsyncEnumerable<object> RunAsync(IEnumerable<ScrapeRequest> startRequests, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(startRequests);
         if (_routes.Count == 0 && _fallbackRoute == null) throw new InvalidOperationException("No handlers: register one with Route(label, handler)");
@@ -103,7 +139,7 @@ public sealed class Scraper<TItem>
         if (Interlocked.Exchange(ref _running, 1) == 1) throw new InvalidOperationException("The scraper is already running");
         try
         {
-            var run = new ScraperRun<TItem>(this, cancellationToken);
+            var run = new ScraperRun(this, cancellationToken);
             _lastRun = run;
             await using (run.ConfigureAwait(false))
             {
@@ -132,25 +168,28 @@ public sealed class Scraper<TItem>
     }
 
     /// <summary>Runs the scraping from one or more requests; see <see cref="RunAsync(IEnumerable{ScrapeRequest}, CancellationToken)"/>.</summary>
-    public IAsyncEnumerable<TItem> RunAsync(params ScrapeRequest[] startRequests) => RunAsync((IEnumerable<ScrapeRequest>)startRequests);
+    public IAsyncEnumerable<object> RunAsync(params ScrapeRequest[] startRequests) => RunAsync((IEnumerable<ScrapeRequest>)startRequests);
 
     /// <summary>Runs the scraping and collects everything: items, failed requests and counters.</summary>
-    public async Task<ScrapeResult<TItem>> RunToListAsync(IEnumerable<ScrapeRequest> startRequests, CancellationToken cancellationToken = default)
+    public async Task<ScrapeResult> RunToListAsync(IEnumerable<ScrapeRequest> startRequests, CancellationToken cancellationToken = default)
     {
-        var items = new List<TItem>();
+        var items = new List<object>();
         await foreach (var item in RunAsync(startRequests, cancellationToken).ConfigureAwait(false))
         {
             items.Add(item);
         }
         var run = _lastRun!;
-        return new ScrapeResult<TItem>(items, [.. run.FailedRequests], run.Stats);
+        return new ScrapeResult(items, [.. run.FailedRequests], run.Stats);
     }
 
     /// <summary>Runs the scraping from one or more requests and collects everything.</summary>
-    public Task<ScrapeResult<TItem>> RunToListAsync(params ScrapeRequest[] startRequests) => RunToListAsync((IEnumerable<ScrapeRequest>)startRequests);
+    public Task<ScrapeResult> RunToListAsync(params ScrapeRequest[] startRequests) => RunToListAsync((IEnumerable<ScrapeRequest>)startRequests);
 
-    internal Func<ScrapeContext<TItem>, Task>? FindRoute(string label) =>
-        _routes.TryGetValue(label, out var handler) ? handler : _fallbackRoute;
+    internal ScrapeRoute? FindRoute(string label) => _routes.TryGetValue(label, out var route) ? route : _fallbackRoute;
+
+    internal static InvalidOperationException WrongData(string label, Type expected, object? data) => new(data is null
+        ? $"The handler of \"{label}\" takes {expected.Name} data and the request has none: queue it with Enqueue(url, label, data)"
+        : $"The handler of \"{label}\" takes {expected.Name} data and the request has {data.GetType().Name}");
 
     internal void RaiseRequestFailed(FailedRequest failed)
     {

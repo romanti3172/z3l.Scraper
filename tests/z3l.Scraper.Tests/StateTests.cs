@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using z3l.FastHtmlParser;
 
 namespace z3l.Scraper.Tests;
@@ -42,8 +43,8 @@ public sealed class StateTests
         return PageResponse.FromText(200, r.Url, ScraperTests.Html(n < 9 ? $"<a href='/{n + 1}'>next</a>" : "end"));
     });
 
-    private static Scraper<int> ChainScraper(DelegateLoader loader, ScraperOptions options) =>
-        new Scraper<int>(loader, options).Route("default", ctx =>
+    private static Scraper ChainScraper(DelegateLoader loader, ScraperOptions options) =>
+        new Scraper(loader, options).Route("default", ctx =>
         {
             ctx.Enqueue(ctx.Html.XPathValue("//a/@href"));
             ctx.Emit(int.Parse(ctx.Request.Url[(ctx.Request.Url.LastIndexOf('/') + 1)..]));
@@ -71,7 +72,7 @@ public sealed class StateTests
         var first = new List<int>();
         await foreach (var item in ChainScraper(Chain(loads), options).RunAsync(["https://s.test/0"]))
         {
-            first.Add(item);
+            first.Add((int)item);
             if (first.Count == 4) break;
         }
         Assert.IsTrue(File.Exists(StatePath), "the stopped run must leave its state");
@@ -79,7 +80,7 @@ public sealed class StateTests
         // second run with the same start: continues instead of starting over
         var scraper = ChainScraper(Chain(loads), Options());
         var second = new List<int>();
-        await foreach (var item in scraper.RunAsync(["https://s.test/0"])) second.Add(item);
+        await foreach (var item in scraper.RunAsync(["https://s.test/0"])) second.Add((int)item);
 
         CollectionAssert.AreEquivalent(Enumerable.Range(0, 10).ToArray(), first.Union(second).ToArray(), "nothing lost");
         // items taken by the first loop are not redone; only the last one (its loop body was left by break) may come again
@@ -98,7 +99,7 @@ public sealed class StateTests
         var options = Options();
         options.StateSaveInterval = TimeSpan.FromMilliseconds(50);
         var seenOnDisk = false;
-        var scraper = new Scraper<int>(Chain(loads, TimeSpan.FromMilliseconds(40)), options).Route("default", ctx =>
+        var scraper = new Scraper(Chain(loads, TimeSpan.FromMilliseconds(40)), options).Route("default", ctx =>
         {
             ctx.Enqueue(ctx.Html.XPathValue("//a/@href"));
             if (ctx.Request.Url.EndsWith("/6")) seenOnDisk = File.Exists(StatePath);
@@ -118,14 +119,14 @@ public sealed class StateTests
         var stamp = new DateTimeOffset(2026, 11, 15, 10, 0, 0, TimeSpan.FromHours(5));
         var requests = new ScrapeRequest[]
         {
-            new("https://s.test/1") { UserData = 42 },
-            new("https://s.test/2") { UserData = 42L },
-            new("https://s.test/3") { UserData = 0.1 },
-            new("https://s.test/4") { UserData = 12.50m },
-            new("https://s.test/5") { UserData = "текст" },
-            new("https://s.test/6") { UserData = true },
-            new("https://s.test/7") { UserData = stamp },
-            new("https://s.test/8") { UserData = json },
+            new("https://s.test/1") { Data = 42 },
+            new("https://s.test/2") { Data = 42L },
+            new("https://s.test/3") { Data = 0.1 },
+            new("https://s.test/4") { Data = 12.50m },
+            new("https://s.test/5") { Data = "текст" },
+            new("https://s.test/6") { Data = true },
+            new("https://s.test/7") { Data = stamp },
+            new("https://s.test/8") { Data = json },
             new("https://s.test/9", "post") { Method = HttpMethod.Post, Body = "q=1", ContentType = "text/plain", Headers = new Dictionary<string, string> { ["X-A"] = "b" }, Priority = ScrapePriority.High, MaxRetries = 7, UniqueKey = "own" },
         };
 
@@ -133,26 +134,26 @@ public sealed class StateTests
         var stuck = new DelegateLoader(async (r, token) => { await Task.Delay(Timeout.Infinite, token); return null!; });
         var options = Options(concurrency: 4);
         options.MaxRunDuration = TimeSpan.FromMilliseconds(200);
-        await new Scraper<object?>(stuck, options).Route("default", _ => { }).Route("post", _ => { }).RunToListAsync(requests);
+        await new Scraper(stuck, options).Route("default", _ => { }).Route("post", _ => { }).RunToListAsync(requests);
         Assert.IsTrue(File.Exists(StatePath));
 
         var fast = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, "x")));
         var restored = new ConcurrentDictionary<string, ScrapeRequest>();
-        await new Scraper<object?>(fast, Options())
+        await new Scraper(fast, Options())
             .Route("default", ctx => restored[ctx.Request.Url] = ctx.Request)
             .Route("post", ctx => restored[ctx.Request.Url] = ctx.Request)
             .RunToListAsync();
 
         Assert.HasCount(9, restored);
-        Assert.AreEqual(42, restored["https://s.test/1"].UserData);
-        Assert.AreEqual(42L, restored["https://s.test/2"].UserData);
-        Assert.AreEqual(0.1, restored["https://s.test/3"].UserData);
-        Assert.AreEqual(12.50m, restored["https://s.test/4"].UserData);
-        Assert.AreEqual("текст", restored["https://s.test/5"].UserData);
-        Assert.IsInstanceOfType<bool>(restored["https://s.test/6"].UserData);
-        Assert.IsTrue((bool)restored["https://s.test/6"].UserData!);
-        Assert.AreEqual(stamp, restored["https://s.test/7"].UserData);
-        Assert.AreEqual(1, ((JsonElement)restored["https://s.test/8"].UserData!).GetProperty("a").GetInt32());
+        Assert.AreEqual(42, restored["https://s.test/1"].Data);
+        Assert.AreEqual(42L, restored["https://s.test/2"].Data);
+        Assert.AreEqual(0.1, restored["https://s.test/3"].Data);
+        Assert.AreEqual(12.50m, restored["https://s.test/4"].Data);
+        Assert.AreEqual("текст", restored["https://s.test/5"].Data);
+        Assert.IsInstanceOfType<bool>(restored["https://s.test/6"].Data);
+        Assert.IsTrue((bool)restored["https://s.test/6"].Data!);
+        Assert.AreEqual(stamp, restored["https://s.test/7"].Data);
+        Assert.AreEqual(1, ((JsonElement)restored["https://s.test/8"].Data!).GetProperty("a").GetInt32());
         var post = restored["https://s.test/9"];
         Assert.AreEqual(HttpMethod.Post, post.Method);
         Assert.AreEqual("q=1", post.Body);
@@ -167,11 +168,12 @@ public sealed class StateTests
     [TestMethod]
     public async Task UnsupportedUserData_IsRefusedAtOnce()
     {
-        var scraper = new Scraper<int>(new FakeLoader(), Options()).Route("default", _ => { });
+        var scraper = new Scraper(new FakeLoader(), Options()).Route("default", _ => { });
 
         var error = await Assert.ThrowsExactlyAsync<NotSupportedException>(() =>
-            scraper.RunToListAsync(new ScrapeRequest("https://s.test/a") { UserData = new List<int>() }));
-        StringAssert.Contains(error.Message, "JsonSerializer.SerializeToElement");
+            scraper.RunToListAsync(new ScrapeRequest("https://s.test/a") { Data = new List<int>() }));
+        StringAssert.Contains(error.Message, "List<Int32>");
+        StringAssert.Contains(error.Message, "typed handler");
     }
 
     [TestMethod]
@@ -179,7 +181,7 @@ public sealed class StateTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
         await File.WriteAllTextAsync(StatePath, "{ not json");
-        var scraper = new Scraper<int>(new FakeLoader(), Options()).Route("default", _ => { });
+        var scraper = new Scraper(new FakeLoader(), Options()).Route("default", _ => { });
 
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => scraper.RunToListAsync("https://s.test/a"));
 
@@ -195,10 +197,47 @@ public sealed class StateTests
         var stuck = new DelegateLoader(async (r, token) => { await Task.Delay(Timeout.Infinite, token); return null!; });
         var options = Options();
         options.MaxRunDuration = TimeSpan.FromMilliseconds(100);
-        await new Scraper<int>(stuck, options).Route("old-label", _ => { }).RunToListAsync(new ScrapeRequest("https://s.test/a", "old-label"));
+        await new Scraper(stuck, options).Route("old-label", _ => { }).RunToListAsync(new ScrapeRequest("https://s.test/a", "old-label"));
 
-        var scraper = new Scraper<int>(new FakeLoader(), Options()).Route("default", _ => { });
+        var scraper = new Scraper(new FakeLoader(), Options()).Route("default", _ => { });
         var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => scraper.RunToListAsync());
         StringAssert.Contains(error.Message, "old-label");
+    }
+
+    public sealed record Teaser(string Price, List<string> Tags);
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task TypedData_SurvivesTheRestart_WithStateJson()
+    {
+        var teaser = new Teaser("10.00", ["new", "sale"]);
+        var stuck = new DelegateLoader(async (r, token) => { await Task.Delay(Timeout.Infinite, token); return null!; });
+        var options = Options();
+        options.StateJson = new DefaultJsonTypeInfoResolver();
+        options.MaxRunDuration = TimeSpan.FromMilliseconds(150);
+        await new Scraper(stuck, options).Route<Teaser>(PageType.Item, (_, _) => { })
+            .RunToListAsync(ScrapeRequest.For("https://s.test/p/1", PageType.Item, teaser));
+        Assert.IsTrue(File.Exists(StatePath));
+
+        var fast = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, "x")));
+        var resumed = Options();
+        resumed.StateJson = new DefaultJsonTypeInfoResolver();
+        Teaser? restored = null;
+        await new Scraper(fast, resumed).Route<Teaser>(PageType.Item, (_, data) => restored = data).RunToListAsync();
+
+        Assert.IsNotNull(restored);
+        Assert.AreEqual(teaser.Price, restored.Price);
+        CollectionAssert.AreEqual(teaser.Tags, restored.Tags);
+        Assert.IsFalse(File.Exists(StatePath));
+    }
+
+    [TestMethod]
+    public async Task TypedData_WithoutStateJson_IsRefusedAtOnce()
+    {
+        var scraper = new Scraper(new FakeLoader(), Options()).Route<Teaser>(PageType.Item, (_, _) => { });
+
+        var error = await Assert.ThrowsExactlyAsync<NotSupportedException>(() =>
+            scraper.RunToListAsync(ScrapeRequest.For("https://s.test/p/1", PageType.Item, new Teaser("1", []))));
+        StringAssert.Contains(error.Message, "StateJson");
     }
 }

@@ -12,29 +12,39 @@ public enum ScrapePriority
 }
 
 /// <summary>
-/// A page to load. <see cref="Label"/> selects the handler registered with
-/// <see cref="Scraper{TItem}.Route(string, Func{ScrapeContext{TItem}, Task})"/>.
+/// A page to load. <see cref="Label"/> selects the handler registered with <see cref="Scraper.Route(ScrapeLabel, Func{ScrapeContext, Task})"/>;
+/// <see cref="Data"/> goes to a handler registered with <see cref="Scraper.Route{TData}(ScrapeLabel, Func{ScrapeContext, TData, Task})"/>.
 /// </summary>
-/// <remarks>A plain string converts to a request with the <see cref="DefaultLabel"/>.</remarks>
+/// <remarks>A plain string converts to a request with the default label.</remarks>
 public sealed record ScrapeRequest
 {
     /// <summary>Label used when none is given.</summary>
-    public const string DefaultLabel = "default";
+    public const string DefaultLabel = ScrapeLabel.DefaultName;
 
     /// <summary>Creates a request.</summary>
     /// <param name="url">Absolute URL.</param>
-    /// <param name="label">Handler label; <see cref="DefaultLabel"/> when omitted.</param>
-    public ScrapeRequest(string url, string? label = null)
+    /// <param name="label">Handler label: a <see cref="PageType"/> or a string; the default label when omitted.</param>
+    public ScrapeRequest(string url, ScrapeLabel label = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
         Url = url;
-        Label = string.IsNullOrWhiteSpace(label) ? DefaultLabel : label;
+        Label = label.Name;
+    }
+
+    /// <summary>Creates a request with data for a typed handler.</summary>
+    /// <param name="url">Absolute URL.</param>
+    /// <param name="label">Handler label.</param>
+    /// <param name="data">Data of the page, passed to the handler registered with <c>Route&lt;TData&gt;</c>.</param>
+    public static ScrapeRequest For<TData>(string url, ScrapeLabel label, TData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        return new ScrapeRequest(url, label) { Data = data };
     }
 
     /// <summary>Absolute URL.</summary>
     public string Url { get; init; }
 
-    /// <summary>Selects the handler and the response rules.</summary>
+    /// <summary>Selects the handler and the response rules (a <see cref="PageType"/> name or your own string).</summary>
     public string Label { get; init; }
 
     /// <summary>HTTP method, GET by default.</summary>
@@ -52,8 +62,11 @@ public sealed record ScrapeRequest
     /// <summary>Queue priority.</summary>
     public ScrapePriority Priority { get; init; } = ScrapePriority.Normal;
 
-    /// <summary>Any data to pass to the handler (category name, parent item...).</summary>
-    public object? UserData { get; init; }
+    /// <summary>
+    /// Data of the page (category, parent item...). A handler registered with <c>Route&lt;TData&gt;</c> gets it typed;
+    /// other handlers read it here.
+    /// </summary>
+    public object? Data { get; init; }
 
     /// <summary>Overrides <see cref="ScraperOptions.MaxRetries"/> for this request.</summary>
     public int? MaxRetries { get; init; }

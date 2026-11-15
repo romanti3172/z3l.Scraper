@@ -43,7 +43,7 @@
 
     <div class="stats">
       <div class="stat"><b>27k</b><span>pages/s engine speed, in-memory loader</span></div>
-      <div class="stat"><b>8</b><span>kinds of site trouble handled</span></div>
+      <div class="stat"><b>9</b><span>kinds of site trouble handled</span></div>
       <div class="stat"><b>0</b><span>pages lost when a run resumes</span></div>
       <div class="stat"><b>2</b><span>dependencies</span></div>
     </div>
@@ -57,32 +57,32 @@
           <p>Queues, retries, checks, limits and state are the engine's job.</p>
         </div>
         <ul class="code-points">
-          <li><span class="dot">1</span><div><b>Labels and handlers</b><span>Every kind of page has its handler; links are queued with a label.</span></div></li>
+          <li><span class="dot">1</span><div><b>Labels and typed page data</b><span>Every kind of page has its handler, by <code>PageType</code> or your own label; a page passes what it knows to the next one, typed.</span></div></li>
           <li><span class="dot">2</span><div><b>Checks before your code</b><span>Blocked, missing and cut-off pages never reach the handler: they are retried or reported.</span></div></li>
           <li><span class="dot">3</span><div><b>Whole pages or nothing</b><span>Items of a handler that throws are dropped, so a retried page never gives duplicates.</span></div></li>
           <li><span class="dot">4</span><div><b>Results as you go</b><span><code>await foreach</code> gets items while the crawl runs; a slow consumer slows the crawl down.</span></div></li>
         </ul>
       </div>
-<pre class="code"><code><span class="k">using var</span> loader = <span class="k">new</span> <span class="t">HttpPageLoader</span>();
+<pre class="code"><code><span class="k">var</span> proxies = <span class="t">ProxyList</span>.<span class="m">FromFile</span>(<span class="s">"proxies.txt"</span>);   <span class="c">// http, socks5...</span>
+<span class="k">using var</span> loader = <span class="k">new</span> <span class="t">HttpPageLoader</span>(<span class="k">new</span>() { Proxies = proxies });
 
-<span class="k">var</span> options = <span class="k">new</span> <span class="t">ScraperOptions</span> { RespectRobotsTxt = <span class="k">true</span> };
-options.Rules.Default.BlockedMarkers.<span class="m">Add</span>(<span class="s">"Just a moment"</span>);
-
-<span class="k">var</span> scraper = <span class="k">new</span> <span class="t">Scraper</span>&lt;<span class="t">Book</span>&gt;(loader, options)
-    .<span class="m">Route</span>(<span class="s">"list"</span>, ctx =&gt;
+<span class="k">var</span> scraper = <span class="k">new</span> <span class="t">Scraper</span>(loader)
+    .<span class="m">Route</span>(<span class="t">PageType</span>.Listing, ctx =&gt;
     {
-        ctx.<span class="m">Enqueue</span>(ctx.Html.<span class="m">XPathValues</span>(<span class="s">"//h3/a/@href"</span>), <span class="s">"book"</span>);
-        ctx.<span class="m">Enqueue</span>(ctx.Html.<span class="m">XPathValue</span>(<span class="s">"//li[@class='next']/a/@href"</span>), <span class="s">"list"</span>);
+        <span class="k">foreach</span> (<span class="k">var</span> card <span class="k">in</span> ctx.Html.<span class="m">FindAll</span>(<span class="t">HtmlTag</span>.Article))
+            ctx.<span class="m">Enqueue</span>(card.<span class="m">Find</span>(<span class="t">HtmlTag</span>.A).<span class="m">AttributeHref</span>(), <span class="t">PageType</span>.Item,
+                <span class="k">new</span> <span class="t">Teaser</span>(card.<span class="m">Find</span>(<span class="t">HtmlTag</span>.P, cls: <span class="s">"rating"</span>).<span class="m">Text</span>()));
+        ctx.<span class="m">Enqueue</span>(ctx.Html.<span class="m">XPathValue</span>(<span class="s">"//li[@class='next']/a/@href"</span>), <span class="t">PageType</span>.Listing);
     })
-    .<span class="m">Route</span>(<span class="s">"book"</span>, ctx =&gt; ctx.<span class="m">Emit</span>(<span class="k">new</span> <span class="t">Book</span>(
-        ctx.Html.<span class="m">Find</span>(<span class="t">HtmlTag</span>.H1).<span class="m">Text</span>(),
-        ctx.Html.<span class="m">Find</span>(<span class="t">HtmlTag</span>.P, cls: <span class="s">"price_color"</span>).<span class="m">Text</span>())));
+    .<span class="m">Route</span>&lt;<span class="t">Teaser</span>&gt;(<span class="t">PageType</span>.Item, (ctx, teaser) =&gt; ctx.<span class="m">Emit</span>(<span class="k">new</span> <span class="t">Book</span>(
+        ctx.Html.<span class="m">Find</span>(<span class="t">HtmlTag</span>.H1).<span class="m">Text</span>(), teaser.Rating)));
 
-<span class="k">await foreach</span> (<span class="k">var</span> book <span class="k">in</span> scraper.<span class="m">RunAsync</span>(
-    <span class="k">new</span> <span class="t">ScrapeRequest</span>(<span class="s">"https://books.toscrape.com/"</span>, <span class="s">"list"</span>)))
+<span class="k">await foreach</span> (<span class="k">var</span> item <span class="k">in</span> scraper.<span class="m">RunAsync</span>(
+    <span class="k">new</span> <span class="t">ScrapeRequest</span>(<span class="s">"https://books.toscrape.com/"</span>, <span class="t">PageType</span>.Listing)))
 {
-    <span class="m">Save</span>(book);    <span class="c">// streamed while the crawl runs</span>
+    <span class="k">if</span> (item <span class="k">is</span> <span class="t">Book</span> book) <span class="m">Save</span>(book);   <span class="c">// streamed while the crawl runs</span>
 }</code></pre>
+
     </div>
   </section>
 
@@ -96,7 +96,8 @@ options.Rules.Default.BlockedMarkers.<span class="m">Add</span>(<span class="s">
         <table class="trouble">
           <thead><tr><th>The site does</th><th>z3l.Scraper</th></tr></thead>
           <tbody>
-            <tr><td>403, 429, a captcha, "Just a moment..."</td><td>Recognised as a block: your loader is told so it can change the proxy or session, the host slows down, the page is retried.</td></tr>
+            <tr><td>403, 429, a captcha, "Just a moment..."</td><td>Recognised as a block: the proxy that got it rests for that site (an hour by default), the host slows down, the page is retried through another proxy.</td></tr>
+            <tr><td>A proxy dies or wants a login</td><td>After three failures in a row it rests for every site; the others carry on.</td></tr>
             <tr><td>429 with Retry-After</td><td>The whole host pauses as long as asked; pages of other hosts keep loading.</td></tr>
             <tr><td>500, 503, a timeout, a dropped connection</td><td>Retried with exponential backoff and jitter, up to the limit you set.</td></tr>
             <tr><td>A page cut off half-way, an empty body, broken JSON</td><td>Retried: <code>ExpectedContent.Html</code>, <code>Json</code>, <code>MustContain</code> per kind of page.</td></tr>
@@ -114,7 +115,7 @@ options.Rules.Default.BlockedMarkers.<span class="m">Add</span>(<span class="s">
     <div class="wrap">
       <div class="section-head">
         <h2>Everything a crawl needs</h2>
-        <p>In one package of about 2,700 lines, with tests for every case.</p>
+        <p>In one package of about 3,300 lines, with tests for every case.</p>
       </div>
       <div class="features">
         <div class="feature">
@@ -144,13 +145,13 @@ options.Rules.Default.BlockedMarkers.<span class="m">Add</span>(<span class="s">
         </div>
         <div class="feature">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/></svg></div>
-          <h3>Any loader</h3>
-          <p>HttpClient built in; plug a browser, a proxy pool or a loader farm with <code>IPageLoader</code>. Trimming and AOT compatible.</p>
+          <h3>Proxies, or any loader</h3>
+          <p>HttpClient with rotating http and socks proxies from a text file built in; plug a browser or anything else with <code>IPageLoader</code>. Trimming and AOT compatible.</p>
         </div>
       </div>
       <p class="honest"><b>What it is not.</b> It does not run JavaScript: for pages built in the browser, plug a browser loader
         (Playwright, Selenium, a remote farm) into <code>IPageLoader</code>. The queue lives in one process and its state file,
-        not in a distributed store. It has no proxy pool inside: your loader brings the proxies, and the scraper tells it which ones got blocked.</p>
+        not in a distributed store. Proxies come from your list: it does not buy or find them for you.</p>
     </div>
   </section>
 

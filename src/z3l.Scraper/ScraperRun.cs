@@ -10,15 +10,15 @@ using z3l.Scraper.Validation;
 namespace z3l.Scraper;
 
 /// <summary>An item on its way to the consumer, with its page when the run keeps a state file.</summary>
-internal readonly record struct Emitted<TItem>(TItem Item, ScrapeRequest? Request);
+internal readonly record struct Emitted(object Item, ScrapeRequest? Request);
 
 /// <summary>
 /// State of one run. Every accepted request is "pending" until it is handled or failed; retries, host lines and delays keep it
 /// pending. A handler queues new pages before its own request finishes, so pending reaches zero only when all the work is done.
 /// </summary>
-internal sealed class ScraperRun<TItem> : IAsyncDisposable
+internal sealed class ScraperRun : IAsyncDisposable
 {
-    private readonly Scraper<TItem> _scraper;
+    private readonly Scraper _scraper;
     private readonly ScraperOptions _options;
     private readonly CancellationTokenSource _stop;
 
@@ -47,16 +47,17 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
     private readonly HostThrottle _throttle;
     private readonly RobotsCache? _robots;
     private readonly string? _statePath;
+    private readonly StateDataCodec? _codec;
     private readonly SemaphoreSlim _saveLock = new(1, 1);
 
-    private readonly Channel<Emitted<TItem>> _items;
+    private readonly Channel<Emitted> _items;
 
-    public ScraperRun(Scraper<TItem> scraper, CancellationToken cancellationToken)
+    public ScraperRun(Scraper scraper, CancellationToken cancellationToken)
     {
         _scraper = scraper;
         _options = scraper.Options;
         _stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _items = Channel.CreateBounded<Emitted<TItem>>(new BoundedChannelOptions(_options.ItemBufferSize)
+        _items = Channel.CreateBounded<Emitted>(new BoundedChannelOptions(_options.ItemBufferSize)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -71,11 +72,12 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
         }
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath) ? null : _options.StatePath;
+        if (_statePath != null) _codec = new StateDataCodec(scraper.FindRoute, _options.StateJson);
     }
 
     public ScraperStats Stats { get; } = new();
     public ILogger Logger => _scraper.Logger;
-    public ChannelReader<Emitted<TItem>> Items => _items.Reader;
+    public ChannelReader<Emitted> Items => _items.Reader;
     public IEnumerable<FailedRequest> FailedRequests => _failed;
     public Task Completion { get; private set; } = Task.CompletedTask;
 
@@ -150,11 +152,13 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             if (parent != null) return false;
             throw new ArgumentException($"A start request needs an absolute http(s) URL: \"{request.Url}\"", nameof(request));
         }
-        if (_scraper.FindRoute(request.Label) == null)
+        var route = _scraper.FindRoute(request.Label)
+                    ?? throw new InvalidOperationException($"No handler for label \"{request.Label}\": register it with Route(\"{request.Label}\", handler) or add FallbackRoute");
+        if (route.DataType != null && !route.DataType.IsInstanceOfType(request.Data))
         {
-            throw new InvalidOperationException($"No handler for label \"{request.Label}\": register it with Route(\"{request.Label}\", handler) or add FallbackRoute");
+            throw Scraper.WrongData(request.Label, route.DataType, request.Data);     // where the mistake is, not later in the handler
         }
-        if (_statePath != null) RunState.CheckUserData(request.UserData);
+        _codec?.Check(request.Label, request.Data);
 
         var depth = parent == null ? 0 : parent.Depth + 1;
         // own copy: the caller may reuse its instance
@@ -354,9 +358,9 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
 
     private async Task HandleAsync(ScrapeRequest request, PageResponse response, string host, CancellationToken token)
     {
-        var handler = _scraper.FindRoute(request.Label)!;
-        var context = new ScrapeContext<TItem>(this, request, response, token);
-        List<TItem>? items;
+        var handler = _scraper.FindRoute(request.Label)!.Handler;
+        var context = new ScrapeContext(this, request, response, token);
+        List<object>? items;
         try
         {
             await handler(context).ConfigureAwait(false);
@@ -404,7 +408,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             if (tracked != null) Volatile.Write(ref tracked.UnackedItems, items.Count);
             foreach (var item in items)
             {
-                await _items.Writer.WriteAsync(new Emitted<TItem>(item, tracked), token).ConfigureAwait(false);
+                await _items.Writer.WriteAsync(new Emitted(item, tracked), token).ConfigureAwait(false);
                 Stats.AddItem();
             }
         }
@@ -539,7 +543,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
 
     private void RestoreState(string path)
     {
-        var snapshot = RunState.Load(path);
+        var snapshot = RunState.Load(path, _codec!);
         lock (_seen)
         {
             foreach (var key in snapshot.Seen) _seen.Add(key);
@@ -596,7 +600,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         try
         {
             var snapshot = TakeSnapshot();
-            await Task.Run(() => RunState.Save(_statePath!, snapshot)).ConfigureAwait(false);
+            await Task.Run(() => RunState.Save(_statePath!, snapshot, _codec!)).ConfigureAwait(false);
             Logger.LogDebug("State saved to {Path}: {Pending} pending, {Seen} seen", _statePath, snapshot.Pending.Count, snapshot.Seen.Count);
         }
         catch (Exception ex)

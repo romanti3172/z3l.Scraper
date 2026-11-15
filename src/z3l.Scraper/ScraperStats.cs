@@ -95,7 +95,11 @@ public sealed class ScraperStats
 }
 
 /// <summary>Everything a run produced.</summary>
-/// <param name="Items">Emitted items.</param>
+/// <param name="Items">Emitted items, of any types, in the order they came.</param>
 /// <param name="Failed">Requests that failed.</param>
 /// <param name="Stats">Final counters.</param>
-public sealed record ScrapeResult<TItem>(IReadOnlyList<TItem> Items, IReadOnlyList<FailedRequest> Failed, ScraperStats Stats);
+public sealed record ScrapeResult(IReadOnlyList<object> Items, IReadOnlyList<FailedRequest> Failed, ScraperStats Stats)
+{
+    /// <summary>The items of one type (and of types derived from it).</summary>
+    public IReadOnlyList<T> ItemsOf<T>() => [.. Items.OfType<T>()];
+}

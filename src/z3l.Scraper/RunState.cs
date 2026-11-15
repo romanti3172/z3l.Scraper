@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace z3l.Scraper;
 
@@ -14,17 +16,8 @@ internal static class RunState
 
     internal sealed record Snapshot(IReadOnlyCollection<string> Seen, IReadOnlyCollection<ScrapeRequest> Pending);
 
-    /// <summary>UserData has to survive a restart with its type, so only plain values are allowed.</summary>
-    public static void CheckUserData(object? value)
-    {
-        if (value is null or string or bool or int or long or double or decimal or Guid or DateTime or DateTimeOffset or JsonElement) return;
-        throw new NotSupportedException(
-            $"With ScraperOptions.StatePath, UserData must be a string, a number, a bool, a Guid, a DateTime, a DateTimeOffset or a JsonElement, " +
-            $"because it is saved to the state file; got {value.GetType().Name}. Put an object in as JSON: JsonSerializer.SerializeToElement(value).");
-    }
-
     /// <summary>Writes the file atomically: a temporary file first, then a rename over the old one.</summary>
-    public static void Save(string path, Snapshot snapshot)
+    public static void Save(string path, Snapshot snapshot, StateDataCodec codec)
     {
         var full = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(full);
@@ -45,7 +38,7 @@ internal static class RunState
                 writer.WriteEndArray();
 
                 writer.WriteStartArray("pending");
-                foreach (var request in snapshot.Pending) WriteRequest(writer, request);
+                foreach (var request in snapshot.Pending) WriteRequest(writer, request, codec);
                 writer.WriteEndArray();
 
                 writer.WriteEndObject();
@@ -56,7 +49,7 @@ internal static class RunState
     }
 
     /// <exception cref="InvalidDataException">The file is not a state file of this version.</exception>
-    public static Snapshot Load(string path)
+    public static Snapshot Load(string path, StateDataCodec codec)
     {
         using var stream = File.OpenRead(path);
         JsonDocument document;
@@ -94,13 +87,13 @@ internal static class RunState
             var pending = new List<ScrapeRequest>();
             if (root.TryGetProperty("pending", out var pendingArray))
             {
-                foreach (var item in pendingArray.EnumerateArray()) pending.Add(ReadRequest(item));
+                foreach (var item in pendingArray.EnumerateArray()) pending.Add(ReadRequest(item, codec));
             }
             return new Snapshot(seen, pending);
         }
     }
 
-    private static void WriteRequest(Utf8JsonWriter writer, ScrapeRequest request)
+    private static void WriteRequest(Utf8JsonWriter writer, ScrapeRequest request, StateDataCodec codec)
     {
         writer.WriteStartObject();
         writer.WriteString("url", request.Url);
@@ -119,17 +112,18 @@ internal static class RunState
         if (request.UniqueKey != null) writer.WriteString("uniqueKey", request.UniqueKey);
         if (request.SkipDuplicateCheck) writer.WriteBoolean("skipDuplicateCheck", true);
         if (request.Depth != 0) writer.WriteNumber("depth", request.Depth);
-        if (request.UserData != null)
+        if (request.Data != null)
         {
-            writer.WritePropertyName("userData");
-            WriteUserData(writer, request.UserData);
+            writer.WritePropertyName("data");
+            codec.Write(writer, request.Label, request.Data);
         }
         writer.WriteEndObject();
     }
 
-    private static ScrapeRequest ReadRequest(JsonElement item)
+    private static ScrapeRequest ReadRequest(JsonElement item, StateDataCodec codec)
     {
-        var request = new ScrapeRequest(item.GetProperty("url").GetString()!, item.GetProperty("label").GetString())
+        var label = item.GetProperty("label").GetString()!;
+        var request = new ScrapeRequest(item.GetProperty("url").GetString()!, label)
         {
             Method = item.TryGetProperty("method", out var method) ? new HttpMethod(method.GetString()!) : HttpMethod.Get,
             Body = item.TryGetProperty("body", out var body) ? body.GetString() : null,
@@ -141,17 +135,35 @@ internal static class RunState
             MaxRetries = item.TryGetProperty("maxRetries", out var maxRetries) ? maxRetries.GetInt32() : null,
             UniqueKey = item.TryGetProperty("uniqueKey", out var uniqueKey) ? uniqueKey.GetString() : null,
             SkipDuplicateCheck = item.TryGetProperty("skipDuplicateCheck", out var skip) && skip.GetBoolean(),
-            UserData = item.TryGetProperty("userData", out var userData) ? ReadUserData(userData) : null,
+            // "userData": files of 0.1.0-preview.3
+            Data = item.TryGetProperty("data", out var data) || item.TryGetProperty("userData", out data) ? codec.Read(label, data) : null,
         };
         request.Depth = item.TryGetProperty("depth", out var depth) ? depth.GetInt32() : 0;
         return request;
     }
+}
 
-    /// <summary>A value with its type tag, so an int comes back as an int and not as a double or a JsonElement.</summary>
-    private static void WriteUserData(Utf8JsonWriter writer, object value)
+/// <summary>
+/// <see cref="ScrapeRequest.Data"/> in the state file. Plain values are written with a type tag, so an int comes back as an int.
+/// Data of a typed handler (<c>Route&lt;TData&gt;</c>) is written as JSON by <see cref="ScraperOptions.StateJson"/>
+/// and read back as the handler's type.
+/// </summary>
+internal sealed class StateDataCodec(Func<string, ScrapeRoute?> findRoute, IJsonTypeInfoResolver? resolver)
+{
+    private readonly JsonSerializerOptions? _json = resolver == null ? null : new JsonSerializerOptions { TypeInfoResolver = resolver };
+    private readonly ConcurrentDictionary<Type, JsonTypeInfo> _typeInfos = new();
+
+    /// <summary>Fails at once, when the request is queued, rather than when the state is saved.</summary>
+    public void Check(string label, object? data)
+    {
+        if (IsPlain(data)) return;
+        TypeInfo(DataType(label, data!));
+    }
+
+    public void Write(Utf8JsonWriter writer, string label, object data)
     {
         writer.WriteStartObject();
-        switch (value)
+        switch (data)
         {
             case string s: writer.WriteString("t", "string"); writer.WriteString("v", s); break;
             case bool b: writer.WriteString("t", "bool"); writer.WriteBoolean("v", b); break;
@@ -163,12 +175,16 @@ internal static class RunState
             case DateTime dt: writer.WriteString("t", "datetime"); writer.WriteString("v", dt.ToString("O", CultureInfo.InvariantCulture)); break;
             case DateTimeOffset dto: writer.WriteString("t", "datetimeoffset"); writer.WriteString("v", dto.ToString("O", CultureInfo.InvariantCulture)); break;
             case JsonElement json: writer.WriteString("t", "json"); writer.WritePropertyName("v"); json.WriteTo(writer); break;
-            default: throw new NotSupportedException($"UserData of type {value.GetType().Name} cannot be saved");
+            default:
+                writer.WriteString("t", "typed");
+                writer.WritePropertyName("v");
+                JsonSerializer.Serialize(writer, data, TypeInfo(DataType(label, data)));
+                break;
         }
         writer.WriteEndObject();
     }
 
-    private static object? ReadUserData(JsonElement element)
+    public object? Read(string label, JsonElement element)
     {
         var value = element.GetProperty("v");
         return element.GetProperty("t").GetString() switch
@@ -183,7 +199,39 @@ internal static class RunState
             "datetime" => DateTime.Parse(value.GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
             "datetimeoffset" => DateTimeOffset.Parse(value.GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
             "json" => value.Clone(),
-            var type => throw new InvalidDataException($"Unknown UserData type \"{type}\" in the state file"),
+            "typed" => value.Deserialize(TypeInfo(findRoute(label)?.DataType
+                       ?? throw new InvalidDataException($"The state file has typed data for \"{label}\", and its handler takes no data: register it with Route<TData>"))),
+            var type => throw new InvalidDataException($"Unknown data type \"{type}\" in the state file"),
         };
     }
+
+    private static bool IsPlain(object? value) =>
+        value is null or string or bool or int or long or double or decimal or Guid or DateTime or DateTimeOffset or JsonElement;
+
+    private Type DataType(string label, object data) => findRoute(label)?.DataType ?? throw new NotSupportedException(
+        $"With ScraperOptions.StatePath, data of \"{label}\" ({TypeName(data.GetType())}) must be a string, a number, a bool, a Guid, a DateTime(Offset) " +
+        $"or a JsonElement, or the label needs a typed handler, Route<{TypeName(data.GetType())}>, so the data can be saved as JSON");
+
+    /// <summary>List&lt;Int32&gt;, not List`1.</summary>
+    internal static string TypeName(Type type) => type.IsGenericType
+        ? $"{type.Name[..type.Name.IndexOf('`')]}<{string.Join(", ", type.GetGenericArguments().Select(TypeName))}>"
+        : type.Name;
+
+    private JsonTypeInfo TypeInfo(Type type) => _typeInfos.GetOrAdd(type, t =>
+    {
+        if (_json == null)
+        {
+            throw new NotSupportedException(
+                $"With ScraperOptions.StatePath, typed data ({t.Name}) is saved as JSON: set ScraperOptions.StateJson to a JsonSerializerContext " +
+                $"with [JsonSerializable(typeof({TypeName(t)}))], or to new DefaultJsonTypeInfoResolver() in an app that is not trimmed");
+        }
+        try
+        {
+            return _json.GetTypeInfo(t);
+        }
+        catch (NotSupportedException ex)
+        {
+            throw new NotSupportedException($"ScraperOptions.StateJson cannot save {TypeName(t)}: add [JsonSerializable(typeof({TypeName(t)}))] to its context", ex);
+        }
+    });
 }

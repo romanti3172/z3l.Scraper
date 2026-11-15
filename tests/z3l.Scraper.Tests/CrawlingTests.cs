@@ -18,7 +18,7 @@ public sealed class CrawlingTests
         var loader = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html($"<a href='/{PageNumber(r.Url) + 1}'>next</a>"))));
         var options = ScraperTests.FastOptions();
         options.MaxDepth = 2;
-        var scraper = new Scraper<(int Page, int Depth)>(loader, options).Route("default", ctx =>
+        var scraper = new Scraper(loader, options).Route("default", ctx =>
         {
             ctx.Enqueue(ctx.Html.XPathValue("//a/@href"));
             ctx.Emit((PageNumber(ctx.Request.Url), ctx.Request.Depth));
@@ -26,7 +26,7 @@ public sealed class CrawlingTests
 
         var result = await scraper.RunToListAsync("https://s.test/0");
 
-        CollectionAssert.AreEqual(new[] { (0, 0), (1, 1), (2, 2) }, result.Items.OrderBy(i => i.Page).ToArray());
+        CollectionAssert.AreEqual(new[] { (0, 0), (1, 1), (2, 2) }, result.ItemsOf<(int Page, int Depth)>().OrderBy(i => i.Page).ToArray());
         Assert.AreEqual(1, result.Stats.SkippedByLimit);
     }
 
@@ -44,7 +44,7 @@ public sealed class CrawlingTests
         var options = ScraperTests.FastOptions();
         options.MaxDepth = 1;
         options.MaxConcurrency = 1;
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx =>
+        var scraper = new Scraper(loader, options).Route("default", ctx =>
         {
             ctx.Enqueue(ctx.Html.XPathValues("//a/@href"));
             ctx.Emit($"{ctx.Request.Url["https://s.test".Length..]}@{ctx.Request.Depth}");
@@ -75,7 +75,7 @@ public sealed class CrawlingTests
         var loads = new ConcurrentQueue<string>();
         var options = ScraperTests.FastOptions();
         options.RespectRobotsTxt = true;
-        var scraper = new Scraper<string>(RobotsSite("User-agent: *\nDisallow: /private", loads), options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+        var scraper = new Scraper(RobotsSite("User-agent: *\nDisallow: /private", loads), options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
 
         var result = await scraper.RunToListAsync("https://s.test/a", "https://s.test/private/1", "https://s.test/b", "https://other.test/private/1");
 
@@ -96,7 +96,7 @@ public sealed class CrawlingTests
         var loads = new ConcurrentQueue<string>();
         var options = ScraperTests.FastOptions();
         options.RespectRobotsTxt = true;
-        var scraper = new Scraper<string>(RobotsSite(robots, loads, status), options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+        var scraper = new Scraper(RobotsSite(robots, loads, status), options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
 
         var result = await scraper.RunToListAsync("https://s.test/private/1");
 
@@ -111,7 +111,7 @@ public sealed class CrawlingTests
         options.RespectRobotsTxt = true;
         options.RobotsUserAgent = "shop-bot";
         const string robots = "User-agent: *\nDisallow: /\n\nUser-agent: shop-bot\nDisallow: /cart";
-        var scraper = new Scraper<string>(RobotsSite(robots, loads), options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+        var scraper = new Scraper(RobotsSite(robots, loads), options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
 
         var result = await scraper.RunToListAsync("https://s.test/p/1", "https://s.test/cart");
 
@@ -126,7 +126,7 @@ public sealed class CrawlingTests
         options.RespectRobotsTxt = true;
         options.MaxConcurrency = 4;
         options.MaxThrottleDelay = TimeSpan.FromSeconds(1);
-        var scraper = new Scraper<string>(RobotsSite("User-agent: *\nCrawl-delay: 0.2", loads), options).Route("default", _ => { });
+        var scraper = new Scraper(RobotsSite("User-agent: *\nCrawl-delay: 0.2", loads), options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync(Enumerable.Range(0, 4).Select(i => (ScrapeRequest)$"https://s.test/{i}"));
 
@@ -160,7 +160,7 @@ public sealed class CrawlingTests
         var options = ScraperTests.FastOptions();
         options.MaxConcurrency = 4;
         options.MaxThrottleDelay = TimeSpan.FromMilliseconds(300);
-        var scraper = new Scraper<string>(TwoHosts(loads), options).Route("default", _ => { });
+        var scraper = new Scraper(TwoHosts(loads), options).Route("default", _ => { });
 
         var requests = Enumerable.Range(0, 5).Select(i => (ScrapeRequest)$"https://a.test/{i}")
             .Concat(Enumerable.Range(0, 20).Select(i => (ScrapeRequest)$"https://b.test/{i}"));
@@ -187,7 +187,7 @@ public sealed class CrawlingTests
         var options = ScraperTests.FastOptions();
         options.MaxConcurrency = 1;
         options.MaxThrottleDelay = TimeSpan.FromSeconds(2);
-        var scraper = new Scraper<string>(TwoHosts(loads, retryAfter: "1"), options).Route("default", _ => { });
+        var scraper = new Scraper(TwoHosts(loads, retryAfter: "1"), options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync(Enumerable.Range(0, 3).Select(i => (ScrapeRequest)$"https://a.test/{i}"));
 
@@ -204,7 +204,7 @@ public sealed class CrawlingTests
         var options = ScraperTests.FastOptions();
         options.AutoThrottle = false;
         options.MaxThrottleDelay = TimeSpan.FromSeconds(5);
-        var scraper = new Scraper<string>(TwoHosts(loads), options).Route("default", _ => { });
+        var scraper = new Scraper(TwoHosts(loads), options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync(Enumerable.Range(0, 10).Select(i => (ScrapeRequest)$"https://a.test/{i}"));
 
@@ -225,7 +225,7 @@ public sealed class CrawlingTests
         options.MaxConcurrency = 1;
         options.MaxThrottleDelay = TimeSpan.FromMilliseconds(400);
         var blocked = 0;
-        var scraper = new Scraper<string>(loader, options).Route("default", _ =>
+        var scraper = new Scraper(loader, options).Route("default", _ =>
         {
             if (Interlocked.Exchange(ref blocked, 1) == 0) throw new RetryRequestException("prices hidden", blocked: true);
         });

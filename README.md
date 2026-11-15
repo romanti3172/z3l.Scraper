@@ -4,27 +4,29 @@ Block-aware web scraping engine for .NET 9 and .NET 10.
 
 You write what to take from a page; the scraper takes care of the rest: a request queue with priorities and
 de-duplication, parallel loading, retries with backoff, recognising blocked, missing and cut-off pages,
-rate and time limits, and streaming typed results while the scraping goes on. HTML is parsed with
+rotating proxies, rate and time limits, and streaming results while the scraping goes on. HTML is parsed with
 [z3l.FastHtmlParser](https://www.nuget.org/packages/z3l.FastHtmlParser).
 
-- **Label routing.** Each request has a label (`"list"`, `"product"`); each label has its own handler, sync or async.
+- **Labels and page data.** Each request has a label, a `PageType` (`Listing`, `Item`...) or your own string; each label
+  has its handler. A page that knows something about the pages it links to passes it on as typed data.
+- **Items of any type.** Handlers emit products, reviews, anything; you get them as they come.
 - **Response checks.** Blocked (403/429, captcha, "Just a moment..."), not found (404, "Product not found"),
   incomplete (`</html>` missing, not JSON, a required part missing): configured per label, retried automatically.
 - **Retries with backoff and jitter**, `Retry-After` respected, a per-request timeout, a time limit for the whole run.
   A handler can ask for a retry (`RetryRequestException`) or give up at once (`NonRetryableException`).
 - **Whole pages or nothing.** Items a handler emits reach you when it finishes; if it throws, they are dropped,
   so a retried page never gives duplicates.
-- **Streaming results.** `await foreach` over items as they are scraped; a slow consumer slows the scraper down
-  instead of filling the memory.
+- **Proxies.** A proxy list from a text file (http, https, socks4, socks5, with logins), given out in turn; a proxy a site
+  blocks rests for that site, a failing one rests for all.
 - **Politeness and limits.** A host that answers 429 / 503 or blocks is slowed down by itself while other hosts keep
   full speed; robots.txt and its Crawl-delay on request; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
   `MaxDepth`, `MaxRunDuration`.
-- **Sitemaps.** Sitemap indexes, gzipped and text sitemaps in one call: `ctx.EnqueueSitemap("product")`.
+- **Sitemaps.** Sitemap indexes, gzipped and text sitemaps in one call: `ctx.EnqueueSitemap(PageType.Item)`.
 - **Runs that survive a crash.** With `StatePath` the queue is saved as it goes and the next run continues;
   pages in work or not taken yet are done again, nothing is lost.
-- **De-duplication** by method, URL (without fragment) and body: POST pages with different bodies are different pages.
-- **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser, a proxy pool or a
-  loader farm. `IBlockAwarePageLoader` is told which responses were blocked, so it can retire a proxy or a session.
+- **Streaming with backpressure.** `await foreach` over items; a slow consumer slows the scraper down instead of
+  filling the memory.
+- **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser or anything else.
 - **Trimming and AOT compatible.**
 
 ## Install
@@ -42,20 +44,20 @@ using z3l.Scraper.Loading;
 
 using var loader = new HttpPageLoader();
 
-var scraper = new Scraper<Book>(loader)
-    .Route("list", ctx =>
+var scraper = new Scraper(loader)
+    .Route(PageType.Listing, ctx =>
     {
-        ctx.Enqueue(ctx.Html.XPathValues("//article[@class='product_pod']//h3/a/@href"), "book");
-        ctx.Enqueue(ctx.Html.XPathValue("//li[@class='next']/a/@href"), "list");      // next page, null is ignored
+        ctx.Enqueue(ctx.Html.XPathValues("//article[@class='product_pod']//h3/a/@href"), PageType.Item);
+        ctx.Enqueue(ctx.Html.XPathValue("//li[@class='next']/a/@href"), PageType.Listing);      // next page, null is ignored
     })
-    .Route("book", ctx => ctx.Emit(new Book(
+    .Route(PageType.Item, ctx => ctx.Emit(new Book(
         Title: ctx.Html.Find(HtmlTag.H1).Text(),
         Price: ctx.Html.Find(HtmlTag.P, cls: "price_color").Text(),
         Url: ctx.Request.Url)));
 
-await foreach (var book in scraper.RunAsync(new ScrapeRequest("https://books.toscrape.com/", "list")))
+await foreach (var item in scraper.RunAsync(new ScrapeRequest("https://books.toscrape.com/", PageType.Listing)))
 {
-    Console.WriteLine(book);
+    Console.WriteLine(item);
 }
 Console.WriteLine(scraper.Stats);
 
@@ -65,20 +67,62 @@ record Book(string? Title, string? Price, string Url);
 Relative links are resolved against the page (its final URL after redirects); links that are not http(s)
 (`mailto:`, `javascript:`, `tel:`) are skipped; pages already queued are skipped.
 
+## Labels and page data
+
+A label is a `PageType` or any string; both work everywhere a label is taken (`Route`, `Enqueue`, `ScrapeRequest`,
+`Rules[...]`), and labels ignore case. `PageType` has `Root`, `Category`, `Listing`, `Item`, `ItemDetails`, `Api`, `File`
+and `Sitemap`; `File` pages are checked as binary and `Api` pages as JSON unless their rules say otherwise.
+
+A listing needs only its link. A page that already knows something about the pages it links to (a price, a rating,
+the category) passes it on as data, and the handler of that label gets it typed:
+
+```csharp
+record Teaser(string Price, string Category);
+
+var scraper = new Scraper(loader)
+    .Route(PageType.Listing, ctx =>
+    {
+        foreach (var card in ctx.Html.FindAll(HtmlTag.Div, cls: "card"))
+        {
+            ctx.Enqueue(card.Find(HtmlTag.A).AttributeHref(), PageType.Item,
+                new Teaser(card.Find(HtmlTag.Span, cls: "price").Text()!, "tea"));
+        }
+        ctx.Enqueue(ctx.Html.XPathValue("//a[@rel='next']/@href"), PageType.Listing);
+    })
+    .Route<Teaser>(PageType.Item, (ctx, teaser) =>
+    {
+        ctx.Emit(new Product(ctx.Html.XPathValue("//h1"), teaser.Price, teaser.Category));
+        foreach (var review in ctx.Html.FindAll(HtmlTag.Div, cls: "review")) ctx.Emit(new Review(review.Text()));
+    })
+    .Route("reviews-api", ctx => ...);                      // your own labels next to page types
+
+await foreach (var item in scraper.RunAsync(new ScrapeRequest("https://shop.example/tea", PageType.Listing)))
+{
+    switch (item)
+    {
+        case Product product: await db.SaveProductAsync(product); break;
+        case Review review: await db.SaveReviewAsync(review); break;
+    }
+}
+```
+
+Data of the wrong type, or none, for a typed handler is an error where the request is queued, not later.
+A start request with data: `ScrapeRequest.For(url, PageType.Item, new Teaser(...))`.
+
 ## Requests
 
 ```csharp
-new ScrapeRequest("https://shop.example/catalog", "list");
+new ScrapeRequest("https://shop.example/catalog", PageType.Listing);
 "https://shop.example/";                                   // a string is a request with the "default" label
 
-new ScrapeRequest("https://shop.example/api/search", "search")
+new ScrapeRequest("https://shop.example/api/search", PageType.Api)
 {
     Method = HttpMethod.Post,
     Body = """{"page":2}""",
     ContentType = "application/json",
     Headers = new Dictionary<string, string> { ["X-Requested-With"] = "XMLHttpRequest" },
     Priority = ScrapePriority.High,
-    UserData = category,                                   // available in the handler as ctx.Request.UserData
+    Data = category,                                       // for Route<Category>, or ctx.Request.Data
     MaxRetries = 10,
 };
 ```
@@ -88,14 +132,15 @@ Start requests need absolute http(s) URLs; a bad one throws `ArgumentException` 
 ## Handlers
 
 ```csharp
-scraper.Route("product", async ctx =>
+scraper.Route(PageType.Item, async ctx =>
 {
-    ctx.Request;               // the request (Url, Label, UserData, Attempts...)
+    ctx.Request;               // the request (Url, Label, Data, Depth, Attempts...)
     ctx.Response;              // StatusCode, Url after redirects, Body, Text, Headers
     ctx.Html;                  // parsed page (z3l.FastHtmlParser), made on first use
     ctx.Json<Product>();       // body as JSON; Json(MyJsonContext.Default.Product) for AOT
-    ctx.Enqueue(url, "label", userData);
-    ctx.Emit(item);            // thread-safe
+    ctx.Enqueue(url, PageType.ItemDetails);
+    ctx.Enqueue(url, PageType.ItemDetails, data);
+    ctx.Emit(item);            // any type, thread-safe
     await SomethingAsync(ctx.CancellationToken);
 });
 scraper.FallbackRoute(ctx => ...);    // labels without a handler of their own
@@ -106,7 +151,7 @@ A label without a handler is an error at once (`InvalidOperationException`), not
 When a page passes the checks but is still wrong, the handler decides:
 
 ```csharp
-scraper.Route("product", ctx =>
+scraper.Route(PageType.Item, ctx =>
 {
     var price = ctx.Html.Find(HtmlTag.Span, cls: "price").Text();
     if (price is null) throw new RetryRequestException("prices hidden for bots", blocked: true);   // load again, tell the loader
@@ -129,13 +174,12 @@ options.Rules.Default.BlockedMarkers.AddRange(["Just a moment...", "captcha"]);
 options.Rules.Default.BlockedStatusCodes.Add(503);                    // 403 and 429 are there already
 
 // for one label, added to the default rules
-options.Rules["product"].MustContain.Add("itemprop=\"price\"");
-options.Rules["product"].NotFoundMarkers.Add("Product not found");
-options.Rules["api"].Content = ExpectedContent.Json;
-options.Rules["image"].Content = ExpectedContent.Binary;              // no text checks
+options.Rules[PageType.Item].MustContain.Add("itemprop=\"price\"");
+options.Rules[PageType.Item].NotFoundMarkers.Add("Product not found");
+options.Rules["reviews-api"].Content = ExpectedContent.Json;
 
 // your own check
-options.Rules["product"].Custom = (request, response) =>
+options.Rules[PageType.Item].Custom = (request, response) =>
     response.Text.Length < 5000 ? ValidationResult.Retry("page too short") : ValidationResult.Ok;
 ```
 
@@ -143,8 +187,8 @@ Checks run in this order; the first that matches decides:
 
 | Check | Verdict | What happens |
 |---|---|---|
-| status in `BlockedStatusCodes` (403, 429) | Blocked | the loader is told, retried |
-| a `BlockedMarkers` string, whatever the status | Blocked | the loader is told, retried |
+| status in `BlockedStatusCodes` (403, 429) | Blocked | the loader is told, the host slows down, retried |
+| a `BlockedMarkers` string, whatever the status | Blocked | as above |
 | a `NotFoundMarkers` string, or status 404 / 410 | NotFound | retried `NotFoundRetries` times (1), then failed |
 | any other non-2xx status | Retry | retried up to `MaxRetries` (5), then failed |
 | empty body (except 204), wrong format, `MustContain`, `MustNotContain`, `Custom` | Retry | as above |
@@ -152,6 +196,31 @@ Checks run in this order; the first that matches decides:
 
 String checks ignore case. A blocked response or a 429 with `Retry-After` waits as long as the server asks
 (up to `MaxRetryDelay`).
+
+## Proxies
+
+```csharp
+var proxies = ProxyList.FromFile("proxies.txt", ProxyBlockPolicy.Block1Hour, logger);
+using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
+```
+
+One proxy per line, `#` for comments:
+
+```
+1.2.3.4:8080                     # http
+1.2.3.4:8080:user:password
+user:password@1.2.3.4:8080
+socks5://user:password@1.2.3.4:1080
+https://proxy.example:443
+```
+
+http, https, socks4, socks4a and socks5 proxies, with or without a login, are handled by .NET itself; every proxy has
+its own connections and cookies. Proxies are given out in turn. When a site blocks an answer, the proxy that loaded it
+rests for that site only, as `ProxyBlockPolicy` says: `Ignore`, `Block10Minutes`, `Block1Hour` (the default),
+`Block1Day` or `Remove`. After `MaxConsecutiveFailures` (3) failures in a row (no connection, 407) a proxy rests for every
+site for `DeadProxyPause` (10 min). When every proxy rests for a site, its loads wait for the first one to come back,
+no longer than `RequestTimeout`. The file is read again when it changes; proxies that stay keep their rests.
+`proxies.Status()` and `proxies.ToString()` show what each proxy did.
 
 ## Throttling
 
@@ -165,11 +234,11 @@ going at full speed meanwhile: the line holds requests, not workers. `AutoThrott
 
 ```csharp
 scraper
-    .Route("sitemap", ctx => ctx.EnqueueSitemap("product",                 // pages with "product", nested sitemaps with "sitemap"
+    .Route(PageType.Sitemap, ctx => ctx.EnqueueSitemap(PageType.Item,          // pages as Item, nested sitemaps as Sitemap
         filter: page => page.LastModified > DateTimeOffset.UtcNow.AddDays(-7)))
-    .Route("product", ctx => ...);
+    .Route(PageType.Item, ctx => ...);
 
-await foreach (var item in scraper.RunAsync(new ScrapeRequest("https://shop.example/sitemap.xml", "sitemap"))) { }
+await foreach (var item in scraper.RunAsync(new ScrapeRequest("https://shop.example/sitemap.xml", PageType.Sitemap))) { }
 
 ctx.ParseSitemap();                       // Urls (Url, LastModified) and nested Sitemaps, if you want to look first
 RobotsTxt.Parse(text).Sitemaps;           // the "Sitemap:" lines of a robots.txt
@@ -177,11 +246,12 @@ RobotsTxt.Parse(text).Sitemaps;           // the "Sitemap:" lines of a robots.tx
 
 Sitemaps may be XML (`urlset`, `sitemapindex`), gzipped (`.xml.gz`) or a text list of URLs.
 
-With `RespectRobotsTxt = true` the scraper loads robots.txt of each host once, with your loader, before its first page:
-disallowed pages fail with `FailureReason.DisallowedByRobotsTxt` without being loaded, and `Crawl-delay` spaces the
-loads of the host. Rules are matched as RFC 9309 says (longest match, Allow wins a tie, `*` and `$`) for the group of
-`RobotsUserAgent` ("z3l-scraper"), or for `*`. A missing robots.txt allows everything; one that cannot be loaded
-(5xx, network error) is logged and the host is crawled without rules.
+`RespectRobotsTxt` is off by default; then robots.txt is not even loaded. With `RespectRobotsTxt = true` the scraper loads
+robots.txt of each host once, with your loader, before its first page: disallowed pages fail with
+`FailureReason.DisallowedByRobotsTxt` without being loaded, and `Crawl-delay` spaces the loads of the host. Rules are matched
+as RFC 9309 says (longest match, Allow wins a tie, `*` and `$`) for the group of `RobotsUserAgent` ("z3l-scraper"), or for
+`*`. A missing robots.txt allows everything; one that cannot be loaded (5xx, network error) is logged and the host is
+crawled without rules.
 
 ## Depth
 
@@ -191,7 +261,11 @@ loads of the host. Rules are matched as RFC 9309 says (longest match, Allow wins
 ## Resuming a run
 
 ```csharp
-var options = new ScraperOptions { StatePath = "state/shop.json" };
+var options = new ScraperOptions
+{
+    StatePath = "state/shop.json",
+    StateJson = new DefaultJsonTypeInfoResolver(),        // for typed page data; MyJsonContext.Default for AOT
+};
 
 await foreach (var item in scraper.RunAsync(startRequests))
 {
@@ -206,8 +280,9 @@ deleted when the run has finished everything and you have taken every item. Star
 
 Pages being loaded when the process died, and pages whose items you had not taken yet, are done again: you get every
 item at least once, so make saving idempotent (an upsert by URL). `RunToListAsync` keeps items in memory, so a crash
-loses them; stream with `RunAsync` when you keep state. With a state file, `UserData` must be a string, a number,
-a bool, a Guid, a DateTime(Offset) or a `JsonElement` (`JsonSerializer.SerializeToElement(category)`).
+loses them; stream with `RunAsync` when you keep state. Page data must be a plain value (a string, a number, a bool,
+a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, saved as JSON with `StateJson`: a
+`JsonSerializerContext` with your data types (trimming and AOT safe) or `new DefaultJsonTypeInfoResolver()`.
 
 ## Options
 
@@ -217,14 +292,14 @@ a bool, a Guid, a DateTime(Offset) or a `JsonElement` (`JsonSerializer.Serialize
 | `MaxRequestsPerMinute` | none | loads spread evenly, retries included |
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
 | `MaxDepth` | none | deepest link to follow; start requests are depth 0 |
-| `AutoThrottle`, `MaxThrottleDelay` | on, 1 min | slow down a host that answers 429 / 503 or blocks |
-| `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
-| `StatePath`, `StateSaveInterval` | none, 30 s | save the run and continue it after a crash |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
 | `RequestTimeout` | 2 min | a slower load is cancelled and retried |
 | `MaxRunDuration` | none | stop and return what was scraped |
+| `AutoThrottle`, `MaxThrottleDelay` | on, 1 min | slow down a host that answers 429 / 503 or blocks |
+| `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
+| `StatePath`, `StateSaveInterval`, `StateJson` | none, 30 s, none | save the run and continue it after a crash |
 | `RetryOnHandlerError` | false | retry when a handler throws |
 | `ItemBufferSize` | 1000 | items waiting for the consumer before workers wait |
 | `ProgressInterval` | 30 s | progress line in the log |
@@ -237,16 +312,16 @@ await foreach (var item in scraper.RunAsync(requests, cancellationToken)) { ... 
 
 // or collect
 var result = await scraper.RunToListAsync(requests);
-result.Items;    // emitted items
-result.Failed;   // FailedRequest: Request, Reason (RetriesExhausted / NotFound / HandlerError / NonRetryable / DisallowedByRobotsTxt), Message, StatusCode, Exception
-result.Stats;    // counters
+result.Items;                 // all items, in the order they came
+result.ItemsOf<Product>();    // the items of one type
+result.Failed;                // FailedRequest: Request, Reason (RetriesExhausted / NotFound / HandlerError / NonRetryable / DisallowedByRobotsTxt), Message, StatusCode, Exception
+result.Stats;                 // counters
 
 scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.Request.Url, failed.Message);
 ```
 
 `scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, retries, blocked,
 items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
-Several item types: use `Scraper<object>` (or a base type) and `OfType<T>()`.
 
 ## Loaders
 
@@ -254,7 +329,7 @@ Several item types: use `Scraper<object>` (or a base type) and `OfType<T>()`.
 // built in: HttpClient with decompression, cookies and connection pooling
 using var loader = new HttpPageLoader(new HttpPageLoaderOptions
 {
-    Proxy = new WebProxy("http://proxy:8080"),             // null: the system proxy settings
+    Proxies = ProxyList.FromFile("proxies.txt"),           // or Proxy = new WebProxy(...) for one; none: the system settings
     UserAgent = "...",
     DefaultHeaders = { ["Accept-Language"] = "de-DE" },
     MaxResponseBytes = 10 * 1024 * 1024,                   // bigger responses fail without retries
@@ -292,7 +367,7 @@ Pass an `ILogger` to the constructor: progress, failures and retries (debug leve
 nothing to the console by itself.
 
 ```csharp
-var scraper = new Scraper<Book>(loader, options, loggerFactory.CreateLogger("scraper"));
+var scraper = new Scraper(loader, options, loggerFactory.CreateLogger("scraper"));
 ```
 
 ## License

@@ -39,7 +39,7 @@ public sealed class StressTests
 
         var options = ScraperTests.FastOptions();
         options.MaxConcurrency = 32;
-        var scraper = new Scraper<int>(loader, options).Route("default", ctx =>
+        var scraper = new Scraper(loader, options).Route("default", ctx =>
         {
             ctx.Enqueue(ctx.Html.XPathValues("//a/@href"));
             ctx.Emit(int.Parse(ctx.Request.Url[(ctx.Request.Url.LastIndexOf('/') + 1)..]));
@@ -85,7 +85,7 @@ public sealed class StressTests
         var options = ScraperTests.FastOptions();
         options.ItemBufferSize = 5;
         options.MaxConcurrency = 4;
-        var scraper = new Scraper<int>(loader, options).Route("default", ctx => ctx.Emit(1));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(1));
         var urls = Enumerable.Range(0, 200).Select(i => (ScrapeRequest)$"https://s.test/{i}");
 
         var maxAhead = 0L;

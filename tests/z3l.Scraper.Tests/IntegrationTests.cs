@@ -32,7 +32,7 @@ public sealed class IntegrationTests
         options.Rules.Default.BlockedMarkers.Add("Just a moment");
         options.Rules["stock"].Content = ExpectedContent.Json;
 
-        var scraper = new Scraper<object>(loader, options)
+        var scraper = new Scraper(loader, options)
             .Route("catalog", ctx =>
             {
                 ctx.Enqueue(ctx.Html.XPathValues("//a[not(@class='next')]/@href"), "product");
@@ -94,7 +94,7 @@ public sealed class IntegrationTests
         loaderOptions.DefaultHeaders["Accept-Language"] = "de-DE";
         using var loader = new HttpPageLoader(loaderOptions);
 
-        var scraper = new Scraper<string>(loader, ScraperTests.FastOptions())
+        var scraper = new Scraper(loader, ScraperTests.FastOptions())
             .Route("default", ctx => ctx.Emit(ctx.Html.Find(HtmlTag.Body).Text()!))
             .Route("cookie", ctx =>
             {
@@ -110,7 +110,7 @@ public sealed class IntegrationTests
             new ScrapeRequest(site.Url("/big"), "binary"),
             new ScrapeRequest(site.Url("/latin1"), "text"));
 
-        var items = result.Items.ToList();
+        var items = result.ItemsOf<string>().ToList();
         Assert.IsTrue(items.Any(i => i.Contains("x=42") && i.StartsWith("ua=Mozilla/5.0") && i.Contains("lang=de-DE")), string.Join("\n", items));
         Assert.IsTrue(items.Any(i => i.Contains("ct=application/json") && i.Contains("body={\"q\":1}")), string.Join("\n", items));
         CollectionAssert.Contains(items, "session=abc123");
@@ -131,7 +131,7 @@ public sealed class IntegrationTests
         using var loader = new HttpPageLoader();
         var options = ScraperTests.FastOptions();
         options.MaxRetries = 1;
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => { });
+        var scraper = new Scraper(loader, options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync(url);
 

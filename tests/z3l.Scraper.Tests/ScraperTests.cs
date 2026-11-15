@@ -23,7 +23,7 @@ public sealed class ScraperTests
     [Timeout(10_000, CooperativeCancellation = true)]
     public async Task NoStartRequests_FinishesAtOnce()
     {
-        var scraper = new Scraper<string>(new FakeLoader(), FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(new FakeLoader(), FastOptions()).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync();
 
@@ -41,7 +41,7 @@ public sealed class ScraperTests
             .Page("https://s.test/p/2", Html("<h1>Two</h1>"))
             .Page("https://s.test/p/3", Html("<h1>Three</h1>"));
 
-        var scraper = new Scraper<string>(loader, FastOptions())
+        var scraper = new Scraper(loader, FastOptions())
             .Route("list", ctx =>
             {
                 ctx.Enqueue(ctx.Html.XPathValues("//a[@class='p']/@href"), "product");
@@ -61,7 +61,7 @@ public sealed class ScraperTests
     public async Task AsyncHandlers_Work()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", async ctx =>
+        var scraper = new Scraper(loader, FastOptions()).Route("default", async ctx =>
         {
             await Task.Delay(10, ctx.CancellationToken);
             ctx.Emit("after await");
@@ -83,7 +83,7 @@ public sealed class ScraperTests
             (200, Html("ok")));
         var options = FastOptions();
         options.Rules.Default.Content = ExpectedContent.Html;
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit("ok"));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -96,7 +96,7 @@ public sealed class ScraperTests
     public async Task GivesUpAfterMaxRetries()
     {
         var loader = new FakeLoader().Page("https://s.test/a", "error", 500);
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => Assert.Fail("handler must not run"));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => Assert.Fail("handler must not run"));
         FailedRequest? reported = null;
         scraper.RequestFailed += f => reported = f;
 
@@ -113,7 +113,7 @@ public sealed class ScraperTests
     public async Task PerRequestMaxRetries_OverridesOptions()
     {
         var loader = new FakeLoader().Page("https://s.test/a", "error", 500);
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync(new ScrapeRequest("https://s.test/a") { MaxRetries = 0 });
 
@@ -124,7 +124,7 @@ public sealed class ScraperTests
     public async Task LoaderException_IsRetried()
     {
         var loader = new FakeLoader().Throws("https://s.test/a", new HttpRequestException("connection reset"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -137,7 +137,7 @@ public sealed class ScraperTests
     public async Task LoaderNonRetryableException_FailsAtOnce()
     {
         var loader = new FakeLoader().Throws("https://s.test/a", new NonRetryableException("too big"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -153,7 +153,7 @@ public sealed class ScraperTests
             .Page("https://s.test/removed", Html("Sorry, product not found"));
         var options = FastOptions();
         options.Rules.Default.NotFoundMarkers.Add("PRODUCT NOT FOUND");
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => Assert.Fail("handler must not run"));
+        var scraper = new Scraper(loader, options).Route("default", _ => Assert.Fail("handler must not run"));
 
         var result = await scraper.RunToListAsync("https://s.test/gone", "https://s.test/removed");
 
@@ -170,7 +170,7 @@ public sealed class ScraperTests
             .Responses("https://s.test/a", (200, Html("<title>Just a moment...</title>")), (403, "denied"), (200, Html("data")));
         var options = FastOptions();
         options.Rules.Default.BlockedMarkers.Add("just a moment");
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit("data"));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("data"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -186,7 +186,7 @@ public sealed class ScraperTests
         var loader = new FakeLoader().Responses("https://s.test/a", (503, Html("<title>Just a moment...</title>")), (200, Html("ok")));
         var options = FastOptions();
         options.Rules.Default.BlockedMarkers.Add("Just a moment");
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit("ok"));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -199,7 +199,7 @@ public sealed class ScraperTests
     public async Task NoContent204_IsAcceptedWithEmptyBody()
     {
         var loader = new DelegateLoader((r, _) => Task.FromResult(new PageResponse(204, r.Url, [])));
-        var scraper = new Scraper<int>(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Response.StatusCode));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Response.StatusCode));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -210,7 +210,7 @@ public sealed class ScraperTests
     public async Task EmptyBody_IsRetried()
     {
         var loader = new DelegateLoader((r, _) => Task.FromResult(new PageResponse(200, r.Url, [])));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -225,7 +225,7 @@ public sealed class ScraperTests
             .Page("https://s.test/other", Html("no price"));
         var options = FastOptions();
         options.Rules["product"].MustContain.Add("price:");
-        var scraper = new Scraper<string>(loader, options)
+        var scraper = new Scraper(loader, options)
             .Route("product", ctx => ctx.Emit("product"))
             .Route("other", ctx => ctx.Emit("other"));
 
@@ -241,7 +241,7 @@ public sealed class ScraperTests
         var loader = new FakeLoader().Responses("https://s.test/a", (200, Html("tiny")), (200, Html(new string('x', 200))));
         var options = FastOptions();
         options.Rules.Default.Custom = (_, response) => response.Body.Length < 100 ? ValidationResult.Blocked("too short") : ValidationResult.Ok;
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit("ok"));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -255,7 +255,7 @@ public sealed class ScraperTests
     public async Task HandlerError_FailsWithoutRetry_ByDefault()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => throw new FormatException("bad price"));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => throw new FormatException("bad price"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -271,7 +271,7 @@ public sealed class ScraperTests
         var options = FastOptions();
         options.RetryOnHandlerError = true;
         var calls = 0;
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx =>
+        var scraper = new Scraper(loader, options).Route("default", ctx =>
         {
             if (Interlocked.Increment(ref calls) < 3) throw new FormatException("flaky");
             ctx.Emit("ok");
@@ -288,7 +288,7 @@ public sealed class ScraperTests
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
         var calls = 0;
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx =>
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx =>
         {
             if (Interlocked.Increment(ref calls) == 1) throw new RetryRequestException("prices hidden", blocked: true);
             ctx.Emit("ok");
@@ -307,7 +307,7 @@ public sealed class ScraperTests
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
         var options = FastOptions();
         options.RetryOnHandlerError = true;
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => throw new NonRetryableException("adult page"));
+        var scraper = new Scraper(loader, options).Route("default", _ => throw new NonRetryableException("adult page"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -320,7 +320,7 @@ public sealed class ScraperTests
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
         var calls = 0;
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx =>
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx =>
         {
             ctx.Emit("item");
             if (Interlocked.Increment(ref calls) == 1) throw new RetryRequestException("half done");
@@ -336,8 +336,8 @@ public sealed class ScraperTests
     public async Task EmitAfterHandlerFinished_Throws()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        ScrapeContext<string>? leaked = null;
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx => leaked = ctx);
+        ScrapeContext? leaked = null;
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => leaked = ctx);
 
         await scraper.RunToListAsync("https://s.test/a");
 
@@ -349,7 +349,7 @@ public sealed class ScraperTests
     public async Task Emit_IsThreadSafe()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<int>(loader, FastOptions()).Route("default", ctx =>
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx =>
             Parallel.For(0, 1000, i => ctx.Emit(i)));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
@@ -361,7 +361,7 @@ public sealed class ScraperTests
     public async Task Json_DeserializesBody()
     {
         var loader = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, """{"name":"Tea","price":9.5}""", "application/json")));
-        var scraper = new Scraper<Dto>(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Json<Dto>()!));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Json<Dto>()!));
 
         var result = await scraper.RunToListAsync("https://s.test/api");
 
@@ -373,7 +373,7 @@ public sealed class ScraperTests
     [TestMethod]
     public async Task UnknownLabel_ThrowsAtStart()
     {
-        var scraper = new Scraper<string>(new FakeLoader(), FastOptions()).Route("list", _ => { });
+        var scraper = new Scraper(new FakeLoader(), FastOptions()).Route("list", _ => { });
 
         var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => scraper.RunToListAsync(new ScrapeRequest("https://s.test/a", "product")));
         StringAssert.Contains(error.Message, "product");
@@ -383,7 +383,7 @@ public sealed class ScraperTests
     public async Task UnknownLabel_FromHandler_FailsThatRequest()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx => ctx.Enqueue("/b", "typo"));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => ctx.Enqueue("/b", "typo"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -394,7 +394,7 @@ public sealed class ScraperTests
     [TestMethod]
     public async Task NoHandlers_Throws()
     {
-        var scraper = new Scraper<string>(new FakeLoader(), FastOptions());
+        var scraper = new Scraper(new FakeLoader(), FastOptions());
 
         await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => scraper.RunToListAsync("https://s.test/a"));
     }
@@ -402,7 +402,7 @@ public sealed class ScraperTests
     [TestMethod]
     public async Task BadStartUrl_Throws()
     {
-        var scraper = new Scraper<string>(new FakeLoader(), FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(new FakeLoader(), FastOptions()).Route("default", _ => { });
 
         var error = await Assert.ThrowsExactlyAsync<ArgumentException>(() => scraper.RunToListAsync("s.test/no-scheme"));
         StringAssert.Contains(error.Message, "s.test/no-scheme");
@@ -414,7 +414,7 @@ public sealed class ScraperTests
     {
         var options = FastOptions();
         options.RequestTimeout = TimeSpan.Zero;
-        var scraper = new Scraper<string>(new FakeLoader(), options).Route("default", _ => { });
+        var scraper = new Scraper(new FakeLoader(), options).Route("default", _ => { });
 
         await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() => scraper.RunToListAsync("https://s.test/a"));
     }
@@ -423,7 +423,7 @@ public sealed class ScraperTests
     public async Task FallbackRoute_HandlesUnknownLabels()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).FallbackRoute(ctx => { ctx.Emit(ctx.Request.Label); return Task.CompletedTask; });
+        var scraper = new Scraper(loader, FastOptions()).FallbackRoute(ctx => { ctx.Emit(ctx.Request.Label); return Task.CompletedTask; });
 
         var result = await scraper.RunToListAsync(new ScrapeRequest("https://s.test/a", "anything"));
 
@@ -434,7 +434,7 @@ public sealed class ScraperTests
     public async Task RequestFailedHandlerThatThrows_DoesNotBreakTheRun()
     {
         var loader = new FakeLoader().Page("https://s.test/a", "error", 500).Page("https://s.test/b", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Request.Url));
         scraper.RequestFailed += _ => throw new InvalidOperationException("bad subscriber");
 
         var result = await scraper.RunToListAsync("https://s.test/a", "https://s.test/b");
@@ -449,7 +449,7 @@ public sealed class ScraperTests
     public async Task PostRequests_WithDifferentBodies_AreNotDuplicates()
     {
         var loader = new FakeLoader().Page("https://s.test/api", "{\"ok\":true}");
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Request.Body!));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => ctx.Emit(ctx.Request.Body!));
 
         var result = await scraper.RunToListAsync(
             new ScrapeRequest("https://s.test/api") { Method = HttpMethod.Post, Body = "page=1" },
@@ -465,7 +465,7 @@ public sealed class ScraperTests
     public async Task SkipDuplicateCheck_LoadsTheSamePageAgain()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", ctx => ctx.Emit("x"));
+        var scraper = new Scraper(loader, FastOptions()).Route("default", ctx => ctx.Emit("x"));
 
         var result = await scraper.RunToListAsync(
             new ScrapeRequest("https://s.test/a"),
@@ -482,7 +482,7 @@ public sealed class ScraperTests
         foreach (var url in urls) loader.Page(url, Html("x"));
         var options = FastOptions();
         options.MaxConcurrency = 3;
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => { });
+        var scraper = new Scraper(loader, options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync(urls.Select(u => (ScrapeRequest)u));
 
@@ -500,7 +500,7 @@ public sealed class ScraperTests
         foreach (var r in low.Append(high)) loader.Page(r.Url, Html("x"));
         var options = FastOptions();
         options.MaxConcurrency = 1;
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => { });
+        var scraper = new Scraper(loader, options).Route("default", _ => { });
 
         await scraper.RunToListAsync(low.Append(high));
 
@@ -518,7 +518,7 @@ public sealed class ScraperTests
         });
         var options = FastOptions();
         options.MaxRequests = 10;
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Enqueue(ctx.Html.XPathValues("//a/@href")));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Enqueue(ctx.Html.XPathValues("//a/@href")));
 
         var result = await scraper.RunToListAsync("https://s.test/1");
 
@@ -538,7 +538,7 @@ public sealed class ScraperTests
         options.MaxConcurrency = 6;
         options.MaxRequestsPerMinute = 600;     // one load per 100 ms
 
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => { });
+        var scraper = new Scraper(loader, options).Route("default", _ => { });
         var result = await scraper.RunToListAsync(urls.Select(u => (ScrapeRequest)u));
 
         Assert.AreEqual(6, result.Stats.Succeeded);
@@ -557,7 +557,7 @@ public sealed class ScraperTests
         var options = FastOptions();
         options.MaxConcurrency = 2;
         options.MaxRunDuration = TimeSpan.FromMilliseconds(400);
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
 
         var result = await scraper.RunToListAsync(urls.Select(u => (ScrapeRequest)u));
 
@@ -575,7 +575,7 @@ public sealed class ScraperTests
         var options = FastOptions();
         options.RetryDelay = TimeSpan.FromSeconds(30);
         options.MaxRunDuration = TimeSpan.FromMilliseconds(300);
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => { });
+        var scraper = new Scraper(loader, options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -589,7 +589,7 @@ public sealed class ScraperTests
     {
         var loader = new FakeLoader { Delay = TimeSpan.FromSeconds(5) };
         loader.Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => { });
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => scraper.RunToListAsync(["https://s.test/a"], cts.Token));
@@ -604,7 +604,7 @@ public sealed class ScraperTests
         foreach (var url in urls) loader.Page(url, Html("x"));
         var options = FastOptions();
         options.ItemBufferSize = 1;
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
 
         var taken = 0;
         await foreach (var _ in scraper.RunAsync(urls.Select(u => (ScrapeRequest)u)))
@@ -623,7 +623,7 @@ public sealed class ScraperTests
     {
         var loader = new FakeLoader { Delay = TimeSpan.FromMilliseconds(300) };
         loader.Page("https://s.test/a", Html("x"));
-        var scraper = new Scraper<string>(loader, FastOptions()).Route("default", _ => { });
+        var scraper = new Scraper(loader, FastOptions()).Route("default", _ => { });
 
         var first = scraper.RunToListAsync("https://s.test/a");
         await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => scraper.RunToListAsync("https://s.test/a"));
@@ -641,7 +641,7 @@ public sealed class ScraperTests
         var options = FastOptions();
         options.RequestTimeout = TimeSpan.FromMilliseconds(50);
         options.MaxRetries = 1;
-        var scraper = new Scraper<string>(loader, options).Route("default", _ => { });
+        var scraper = new Scraper(loader, options).Route("default", _ => { });
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
@@ -655,7 +655,7 @@ public sealed class ScraperTests
     public void RetryDelay_GrowsAndIsCapped()
     {
         var options = new ScraperOptions { RetryDelay = TimeSpan.FromSeconds(1), RetryBackoffFactor = 2, MaxRetryDelay = TimeSpan.FromSeconds(5) };
-        var run = new ScraperRun<string>(new Scraper<string>(new FakeLoader(), options), CancellationToken.None);
+        var run = new ScraperRun(new Scraper(new FakeLoader(), options), CancellationToken.None);
 
         Assert.IsTrue(run.RetryDelay(1) is { TotalMilliseconds: >= 800 and <= 1200 });
         Assert.IsTrue(run.RetryDelay(3) is { TotalMilliseconds: >= 3200 and <= 4800 });
@@ -668,12 +668,12 @@ public sealed class ScraperTests
         static PageResponse WithRetryAfter(string value) =>
             PageResponse.FromText(429, "https://s.test/", "x", headers: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["retry-after"] = value });
 
-        Assert.AreEqual(TimeSpan.FromSeconds(7), ScraperRun<string>.RetryAfter(WithRetryAfter("7")));
+        Assert.AreEqual(TimeSpan.FromSeconds(7), ScraperRun.RetryAfter(WithRetryAfter("7")));
         var date = DateTimeOffset.UtcNow.AddSeconds(30).ToString("r");
-        Assert.IsTrue(ScraperRun<string>.RetryAfter(WithRetryAfter(date)) is { TotalSeconds: > 25 and <= 31 });
-        Assert.AreEqual(TimeSpan.Zero, ScraperRun<string>.RetryAfter(WithRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT")));
-        Assert.IsNull(ScraperRun<string>.RetryAfter(WithRetryAfter("soon")));
-        Assert.IsNull(ScraperRun<string>.RetryAfter(PageResponse.FromText(429, "https://s.test/", "x")));
+        Assert.IsTrue(ScraperRun.RetryAfter(WithRetryAfter(date)) is { TotalSeconds: > 25 and <= 31 });
+        Assert.AreEqual(TimeSpan.Zero, ScraperRun.RetryAfter(WithRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT")));
+        Assert.IsNull(ScraperRun.RetryAfter(WithRetryAfter("soon")));
+        Assert.IsNull(ScraperRun.RetryAfter(PageResponse.FromText(429, "https://s.test/", "x")));
     }
 
     [TestMethod]
@@ -689,7 +689,7 @@ public sealed class ScraperTests
         });
         var options = FastOptions();
         options.RetryDelay = TimeSpan.FromMilliseconds(10);
-        var scraper = new Scraper<string>(loader, options).Route("default", ctx => ctx.Emit("ok"));
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 

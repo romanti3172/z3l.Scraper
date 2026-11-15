@@ -11,16 +11,16 @@ namespace z3l.Scraper;
 /// What a handler gets: the request, the loaded page, and ways to queue more pages and emit items.
 /// Valid only while the handler runs.
 /// </summary>
-/// <typeparam name="TItem">Type of the scraped items.</typeparam>
-public sealed class ScrapeContext<TItem>
+public sealed class ScrapeContext
 {
-    private readonly ScraperRun<TItem> _run;
+    private readonly ScraperRun _run;
     private readonly object _lock = new();
     private HtmlParser? _html;
-    private List<TItem>? _items;
+    private Sitemap? _sitemap;
+    private List<object>? _items;
     private bool _completed;
 
-    internal ScrapeContext(ScraperRun<TItem> run, ScrapeRequest request, PageResponse response, CancellationToken cancellationToken)
+    internal ScrapeContext(ScraperRun run, ScrapeRequest request, PageResponse response, CancellationToken cancellationToken)
     {
         _run = run;
         Request = request;
@@ -56,28 +56,41 @@ public sealed class ScrapeContext<TItem>
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
-    /// Queues a page. A relative URL resolves against the current page.
-    /// Returns false for a duplicate, for a URL that is not http(s) (mailto:, javascript:...) and over <see cref="ScraperOptions.MaxRequests"/>.
+    /// Queues a page that needs only its link (a listing, a category). A relative URL resolves against the current page.
+    /// Returns false for a duplicate, for a URL that is not http(s) (mailto:, javascript:...) and over the limits.
     /// </summary>
     /// <param name="url">Absolute or relative URL; null and empty are ignored.</param>
-    /// <param name="label">Handler label; <see cref="ScrapeRequest.DefaultLabel"/> when omitted.</param>
-    /// <param name="userData">Data for the next handler.</param>
+    /// <param name="label">Handler label: a <see cref="PageType"/> or a string; the default label when omitted.</param>
     /// <param name="priority">Queue priority.</param>
-    public bool Enqueue(string? url, string? label = null, object? userData = null, ScrapePriority priority = ScrapePriority.Normal)
+    public bool Enqueue(string? url, ScrapeLabel label = default, ScrapePriority priority = ScrapePriority.Normal)
     {
         if (string.IsNullOrWhiteSpace(url)) return false;
-        if (!UrlHelper.TryResolve(Response.Url, url, out var absolute)) return false;
-        return Enqueue(new ScrapeRequest(absolute, label) { UserData = userData, Priority = priority });
+        return Enqueue(new ScrapeRequest(url, label) { Priority = priority });
+    }
+
+    /// <summary>
+    /// Queues a page with its data (what the current page already knows about it: a price, a category...).
+    /// The handler of the label, registered with <c>Route&lt;TData&gt;</c>, gets the data typed.
+    /// </summary>
+    /// <param name="url">Absolute or relative URL; null and empty are ignored.</param>
+    /// <param name="label">Handler label.</param>
+    /// <param name="data">Data of the page.</param>
+    /// <param name="priority">Queue priority.</param>
+    public bool Enqueue<TData>(string? url, ScrapeLabel label, TData data, ScrapePriority priority = ScrapePriority.Normal)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        return Enqueue(new ScrapeRequest(url, label) { Data = data, Priority = priority });
     }
 
     /// <summary>Queues pages with one label. Returns how many were new.</summary>
-    public int Enqueue(IEnumerable<string?> urls, string? label = null, ScrapePriority priority = ScrapePriority.Normal)
+    public int Enqueue(IEnumerable<string?> urls, ScrapeLabel label = default, ScrapePriority priority = ScrapePriority.Normal)
     {
         ArgumentNullException.ThrowIfNull(urls);
         var added = 0;
         foreach (var url in urls)
         {
-            if (Enqueue(url, label, null, priority)) added++;
+            if (Enqueue(url, label, priority)) added++;
         }
         return added;
     }
@@ -95,8 +108,6 @@ public sealed class ScrapeContext<TItem>
     /// <summary>The loaded page read as a sitemap: XML (urlset or sitemapindex), gzipped or not, or a text list of URLs.</summary>
     public Sitemap ParseSitemap() => _sitemap ??= Sitemap.Parse(Response);
 
-    private Sitemap? _sitemap;
-
     /// <summary>
     /// Queues what the loaded sitemap lists: its pages with <paramref name="label"/>, and the nested sitemaps of a sitemap index
     /// with <paramref name="sitemapLabel"/> (the label of this request when omitted, so one handler walks the whole tree).
@@ -105,14 +116,13 @@ public sealed class ScrapeContext<TItem>
     /// <param name="label">Label of the pages.</param>
     /// <param name="sitemapLabel">Label of nested sitemaps; the current one by default.</param>
     /// <param name="filter">Which pages to take, for example by URL or by last modification date.</param>
-    public int EnqueueSitemap(string label, string? sitemapLabel = null, Func<SitemapUrl, bool>? filter = null)
+    public int EnqueueSitemap(ScrapeLabel label, ScrapeLabel? sitemapLabel = null, Func<SitemapUrl, bool>? filter = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(label);
         var sitemap = ParseSitemap();
         var added = 0;
         foreach (var nested in sitemap.Sitemaps)
         {
-            if (Enqueue(nested, sitemapLabel ?? Request.Label)) added++;
+            if (Enqueue(nested, sitemapLabel ?? new ScrapeLabel(Request.Label))) added++;
         }
         foreach (var page in sitemap.Urls)
         {
@@ -122,11 +132,12 @@ public sealed class ScrapeContext<TItem>
     }
 
     /// <summary>
-    /// Emits an item. Items reach the consumer when the handler finishes; if the handler throws, its items are dropped,
-    /// so a retried page does not give duplicates. Thread-safe.
+    /// Emits an item of any type. Items reach the consumer when the handler finishes; if the handler throws, its items are
+    /// dropped, so a retried page does not give duplicates. Thread-safe.
     /// </summary>
-    public void Emit(TItem item)
+    public void Emit(object item)
     {
+        ArgumentNullException.ThrowIfNull(item);
         lock (_lock)
         {
             ThrowIfCompleted();
@@ -135,7 +146,7 @@ public sealed class ScrapeContext<TItem>
     }
 
     /// <summary>Ends the context: later calls throw. Returns the emitted items.</summary>
-    internal List<TItem>? Complete()
+    internal List<object>? Complete()
     {
         lock (_lock)
         {
