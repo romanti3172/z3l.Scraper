@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.Logging;
 using z3l.FastHtmlParser;
+using z3l.Scraper.Crawling;
 
 namespace z3l.Scraper;
 
@@ -88,7 +89,36 @@ public sealed class ScrapeContext<TItem>
         ThrowIfCompleted();
 
         if (!UrlHelper.TryResolve(Response.Url, request.Url, out var absolute)) return false;
-        return _run.Enqueue(absolute == request.Url ? request : request with { Url = absolute }, fromHandler: true);
+        return _run.Enqueue(absolute == request.Url ? request : request with { Url = absolute }, parent: Request);
+    }
+
+    /// <summary>The loaded page read as a sitemap: XML (urlset or sitemapindex), gzipped or not, or a text list of URLs.</summary>
+    public Sitemap ParseSitemap() => _sitemap ??= Sitemap.Parse(Response);
+
+    private Sitemap? _sitemap;
+
+    /// <summary>
+    /// Queues what the loaded sitemap lists: its pages with <paramref name="label"/>, and the nested sitemaps of a sitemap index
+    /// with <paramref name="sitemapLabel"/> (the label of this request when omitted, so one handler walks the whole tree).
+    /// Returns how many requests were new.
+    /// </summary>
+    /// <param name="label">Label of the pages.</param>
+    /// <param name="sitemapLabel">Label of nested sitemaps; the current one by default.</param>
+    /// <param name="filter">Which pages to take, for example by URL or by last modification date.</param>
+    public int EnqueueSitemap(string label, string? sitemapLabel = null, Func<SitemapUrl, bool>? filter = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(label);
+        var sitemap = ParseSitemap();
+        var added = 0;
+        foreach (var nested in sitemap.Sitemaps)
+        {
+            if (Enqueue(nested, sitemapLabel ?? Request.Label)) added++;
+        }
+        foreach (var page in sitemap.Urls)
+        {
+            if ((filter == null || filter(page)) && Enqueue(page.Url, label)) added++;
+        }
+        return added;
     }
 
     /// <summary>

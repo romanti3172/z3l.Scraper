@@ -48,8 +48,8 @@ limits.
 1. This license text and the copyright notice must be kept in all copies or substantial portions
    of the Software's source code.
 2. The Licensee may not sell, sublicense or redistribute the Software on its own, or as part of a
-   library, SDK or component whose main purpose is web scraping or crawling, so that it competes with the
-   Software.
+   library, SDK or component whose main purpose is web scraping or crawling, so that it competes
+   with the Software.
 3. Modified versions of the Software may not be published or distributed under a different
    license.
 4. End users of the Licensee's applications and services do not need their own license to use
@@ -73,3 +73,10 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMA
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. THE TOTAL LIABILITY OF
 THE COPYRIGHT HOLDERS SHALL NOT EXCEED THE AMOUNT PAID BY THE LICENSEE FOR THE SOFTWARE.
+
+## 8. Other Components
+
+The Software uses z3l.FastHtmlParser, which is licensed separately under its own license
+(https://www.nuget.org/packages/z3l.FastHtmlParser). Its free and commercial terms follow the
+same thresholds: a Licensee that needs a Commercial License of the Software needs one of
+z3l.FastHtmlParser as well.

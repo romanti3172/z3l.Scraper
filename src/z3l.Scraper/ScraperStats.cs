@@ -13,6 +13,8 @@ public enum FailureReason
     HandlerError,
     /// <summary>The loader or the handler threw <see cref="NonRetryableException"/>.</summary>
     NonRetryable,
+    /// <summary>robots.txt of the host disallows the page (<see cref="ScraperOptions.RespectRobotsTxt"/>).</summary>
+    DisallowedByRobotsTxt,
 }
 
 /// <summary>A request that ended without a handled page.</summary>
@@ -27,7 +29,7 @@ public sealed record FailedRequest(ScrapeRequest Request, FailureReason Reason, 
 public sealed class ScraperStats
 {
     private readonly Stopwatch _clock = new();
-    private long _enqueued, _duplicates, _skipped, _loads, _succeeded, _failed, _notFound, _retries, _blocked, _items, _inProgress, _queued;
+    private long _enqueued, _duplicates, _skipped, _restored, _loads, _succeeded, _failed, _notFound, _retries, _blocked, _items, _inProgress, _queued;
 
     /// <summary>Unique requests accepted.</summary>
     public long Enqueued => Interlocked.Read(ref _enqueued);
@@ -35,6 +37,8 @@ public sealed class ScraperStats
     public long Duplicates => Interlocked.Read(ref _duplicates);
     /// <summary>Requests skipped because <see cref="ScraperOptions.MaxRequests"/> was reached.</summary>
     public long SkippedByLimit => Interlocked.Read(ref _skipped);
+    /// <summary>Unfinished requests taken over from the state file of an earlier run (<see cref="ScraperOptions.StatePath"/>).</summary>
+    public long Restored => Interlocked.Read(ref _restored);
     /// <summary>Load attempts, retries included.</summary>
     public long Loads => Interlocked.Read(ref _loads);
     /// <summary>Requests whose page was handled.</summary>
@@ -65,6 +69,7 @@ public sealed class ScraperStats
     internal void AddEnqueued() => Interlocked.Increment(ref _enqueued);
     internal void AddDuplicate() => Interlocked.Increment(ref _duplicates);
     internal void AddSkippedByLimit() => Interlocked.Increment(ref _skipped);
+    internal void AddRestored() => Interlocked.Increment(ref _restored);
     internal void AddLoad() => Interlocked.Increment(ref _loads);
     internal void AddSucceeded() => Interlocked.Increment(ref _succeeded);
     internal void AddFailed() => Interlocked.Increment(ref _failed);
@@ -81,7 +86,8 @@ public sealed class ScraperStats
         var elapsed = Elapsed;
         var rate = elapsed.TotalMinutes > 0 ? Succeeded / elapsed.TotalMinutes : 0;
         var time = elapsed.TotalDays >= 1 ? $"{(int)elapsed.TotalDays}d {elapsed:hh\\:mm\\:ss}" : $"{elapsed:hh\\:mm\\:ss}";
-        var skipped = SkippedByLimit > 0 ? $", {SkippedByLimit} over MaxRequests" : string.Empty;
+        var skipped = (SkippedByLimit > 0 ? $", {SkippedByLimit} over limits" : string.Empty)
+                      + (Restored > 0 ? $", {Restored} restored" : string.Empty);
         return $"{Succeeded}/{Enqueued} done, {Failed} failed ({NotFound} not found), {Pending} pending " +
                $"({Queued} queued, {InProgress} in progress), {Loads} loads, {Retries} retries, {Blocked} blocked, " +
                $"{Items} items, {Duplicates} duplicates{skipped}, {time}, {rate:F1} pages/min";

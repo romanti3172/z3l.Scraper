@@ -109,12 +109,20 @@ public sealed class Scraper<TItem>
             {
                 run.Start(startRequests);
 
-                await foreach (var item in run.Items.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                // an item counts as taken when the loop asks for the next one: with a state file its page stays there until then
+                ScrapeRequest? taken = null;
+                var hasTaken = false;
+                await foreach (var emitted in run.Items.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    yield return item;
+                    if (hasTaken) run.Acknowledge(taken);
+                    taken = emitted.Request;
+                    hasTaken = true;
+                    yield return emitted.Item;
                 }
+                if (hasTaken) run.Acknowledge(taken);
 
                 await run.Completion.ConfigureAwait(false);
+                run.CompleteState();
             }
         }
         finally

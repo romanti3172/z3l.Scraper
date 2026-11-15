@@ -3,14 +3,18 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
+using z3l.Scraper.Crawling;
 using z3l.Scraper.Loading;
 using z3l.Scraper.Validation;
 
 namespace z3l.Scraper;
 
+/// <summary>An item on its way to the consumer, with its page when the run keeps a state file.</summary>
+internal readonly record struct Emitted<TItem>(TItem Item, ScrapeRequest? Request);
+
 /// <summary>
-/// State of one run. Every accepted request is "pending" until it is handled or failed; retries keep it pending.
-/// A handler queues new pages before its own request finishes, so pending reaches zero only when all the work is done.
+/// State of one run. Every accepted request is "pending" until it is handled or failed; retries, host lines and delays keep it
+/// pending. A handler queues new pages before its own request finishes, so pending reaches zero only when all the work is done.
 /// </summary>
 internal sealed class ScraperRun<TItem> : IAsyncDisposable
 {
@@ -23,26 +27,36 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
     private long _sequence;
     private readonly SemaphoreSlim _available = new(0);
 
+    // guarded by lock (_seen): what was seen, what is pending, how many were accepted (one consistent picture for the state file).
+    // _unsaved holds, with a state file only, the requests not finished plus the finished ones whose items the consumer has not taken:
+    // if the process dies, all of them are done again (at least once)
     private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<ScrapeRequest, byte> _unsaved = new(ReferenceEqualityComparer.Instance);
+    private int _accepted;
+
     private readonly ConcurrentDictionary<string, EffectiveRules> _rules = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<FailedRequest> _failed = new();
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _pending;
-    private int _accepted;
-    private int _limitLogged;
+    private int _requestLimitLogged, _depthLimitLogged;
 
     private readonly object _rateLock = new();
     private readonly long _rateInterval;     // Stopwatch ticks between load starts, 0 for no limit
     private long _nextRateSlot;
 
-    private readonly Channel<TItem> _items;
+    private readonly HostThrottle _throttle;
+    private readonly RobotsCache? _robots;
+    private readonly string? _statePath;
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
+
+    private readonly Channel<Emitted<TItem>> _items;
 
     public ScraperRun(Scraper<TItem> scraper, CancellationToken cancellationToken)
     {
         _scraper = scraper;
         _options = scraper.Options;
         _stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _items = Channel.CreateBounded<TItem>(new BoundedChannelOptions(_options.ItemBufferSize)
+        _items = Channel.CreateBounded<Emitted<TItem>>(new BoundedChannelOptions(_options.ItemBufferSize)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -51,21 +65,29 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         {
             _rateInterval = Stopwatch.Frequency * 60 / perMinute;
         }
+        _throttle = new HostThrottle(_options.MaxThrottleDelay, Push, scraper.Logger, _stop.Token);
+        if (_options.RespectRobotsTxt)
+        {
+            _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
+        }
+        _statePath = string.IsNullOrWhiteSpace(_options.StatePath) ? null : _options.StatePath;
     }
 
     public ScraperStats Stats { get; } = new();
     public ILogger Logger => _scraper.Logger;
-    public ChannelReader<TItem> Items => _items.Reader;
+    public ChannelReader<Emitted<TItem>> Items => _items.Reader;
     public IEnumerable<FailedRequest> FailedRequests => _failed;
     public Task Completion { get; private set; } = Task.CompletedTask;
 
     public void Start(IEnumerable<ScrapeRequest> startRequests)
     {
         Stats.Start();
+        if (_statePath != null && File.Exists(_statePath)) RestoreState(_statePath);
+
         foreach (var request in startRequests)
         {
             ArgumentNullException.ThrowIfNull(request, nameof(startRequests));
-            Enqueue(request, fromHandler: false);
+            Enqueue(request, parent: null);
         }
         if (Volatile.Read(ref _pending) == 0) _drained.TrySetResult();
 
@@ -80,6 +102,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             var token = _stop.Token;
             var workers = Enumerable.Range(0, _options.MaxConcurrency).Select(_ => Task.Run(() => WorkerAsync(token))).ToArray();
             var progress = ProgressAsync(token);
+            var saver = _statePath != null ? SaveLoopAsync(token) : Task.CompletedTask;
             var timeLimit = Task.Delay(_options.MaxRunDuration ?? Timeout.InfiniteTimeSpan, token);
 
             var finished = await Task.WhenAny(_drained.Task, timeLimit).ConfigureAwait(false);
@@ -92,6 +115,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             await _stop.CancelAsync().ConfigureAwait(false);
             await IgnoreCancellation(Task.WhenAll(workers)).ConfigureAwait(false);
             await IgnoreCancellation(progress).ConfigureAwait(false);
+            await IgnoreCancellation(saver).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -101,6 +125,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         finally
         {
             Stats.Stop();
+            if (_statePath != null) await FinishStateAsync().ConfigureAwait(false);
             Logger.LogInformation("Scraping finished: {Stats}", Stats);
             _items.Writer.TryComplete(error);
         }
@@ -115,47 +140,54 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
     // ---------------------------------------------------------------- queue
 
     /// <summary>
-    /// Accepts a new request. False for a duplicate, over <see cref="ScraperOptions.MaxRequests"/>, or for a bad URL from a handler;
-    /// a bad start URL throws.
+    /// Accepts a new request: start requests come without a parent, a handler's requests with the request it handles.
+    /// False for a duplicate, a request over the limits, or a bad URL from a handler; a bad start URL throws.
     /// </summary>
-    public bool Enqueue(ScrapeRequest request, bool fromHandler)
+    public bool Enqueue(ScrapeRequest request, ScrapeRequest? parent)
     {
         if (!UrlHelper.TryNormalize(request.Url, out var url))
         {
-            if (fromHandler) return false;
+            if (parent != null) return false;
             throw new ArgumentException($"A start request needs an absolute http(s) URL: \"{request.Url}\"", nameof(request));
         }
         if (_scraper.FindRoute(request.Label) == null)
         {
             throw new InvalidOperationException($"No handler for label \"{request.Label}\": register it with Route(\"{request.Label}\", handler) or add FallbackRoute");
         }
+        if (_statePath != null) RunState.CheckUserData(request.UserData);
 
-        request = request with { Url = url, Attempts = 0, NotFoundCount = 0 };   // own copy: the caller may reuse its instance
+        var depth = parent == null ? 0 : parent.Depth + 1;
+        // own copy: the caller may reuse its instance
+        request = request with { Url = url, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false };
+        var key = request.SkipDuplicateCheck ? null : request.GetUniqueKey();
 
-        if (!request.SkipDuplicateCheck)
+        lock (_seen)
         {
-            var key = request.GetUniqueKey();
-            lock (_seen)
+            if (key != null && _seen.Contains(key))
             {
-                if (!_seen.Add(key))
-                {
-                    Stats.AddDuplicate();
-                    return false;
-                }
+                Stats.AddDuplicate();
+                return false;
             }
+            // a request over the limits is not marked as seen: found again at a smaller depth it is taken
+            if (_options.MaxDepth is { } maxDepth && depth > maxDepth)
+            {
+                Stats.AddSkippedByLimit();
+                if (Interlocked.Exchange(ref _depthLimitLogged, 1) == 0) Logger.LogInformation("MaxDepth {MaxDepth}: deeper links are skipped", maxDepth);
+                return false;
+            }
+            if (_options.MaxRequests is { } max && _accepted >= max)
+            {
+                Stats.AddSkippedByLimit();
+                if (Interlocked.Exchange(ref _requestLimitLogged, 1) == 0) Logger.LogInformation("MaxRequests {MaxRequests} reached: new requests are skipped", max);
+                return false;
+            }
+
+            if (key != null) _seen.Add(key);
+            _accepted++;
+            if (_statePath != null) _unsaved.TryAdd(request, 0);
+            Interlocked.Increment(ref _pending);
         }
 
-        if (_options.MaxRequests is { } max && Interlocked.Increment(ref _accepted) > max)
-        {
-            Stats.AddSkippedByLimit();
-            if (Interlocked.Exchange(ref _limitLogged, 1) == 0)
-            {
-                Logger.LogInformation("MaxRequests {MaxRequests} reached: new requests are skipped", max);
-            }
-            return false;
-        }
-
-        Interlocked.Increment(ref _pending);
         Stats.AddEnqueued();
         Push(request);
         return true;
@@ -180,9 +212,22 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         }
     }
 
+    /// <summary>The work on the request is over (handled or failed).</summary>
     private void Finish()
     {
         if (Interlocked.Decrement(ref _pending) == 0) _drained.TrySetResult();
+    }
+
+    /// <summary>The request no longer needs to be in the state file: it failed, or the consumer took all its items.</summary>
+    private void Forget(ScrapeRequest request)
+    {
+        if (_statePath != null) _unsaved.TryRemove(request, out _);
+    }
+
+    /// <summary>The consumer asked for the next item, so it is done with the previous one.</summary>
+    public void Acknowledge(ScrapeRequest? request)
+    {
+        if (request != null && Interlocked.Decrement(ref request.UnackedItems) == 0) Forget(request);
     }
 
     // ---------------------------------------------------------------- processing
@@ -217,6 +262,23 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
 
     private async Task ProcessAsync(ScrapeRequest request, CancellationToken token)
     {
+        var uri = new Uri(request.Url);
+        var host = uri.Authority;
+
+        if (_robots != null)
+        {
+            var robots = await _robots.GetAsync(uri).ConfigureAwait(false);
+            if (!robots.IsAllowed(uri, _options.RobotsUserAgent))
+            {
+                Fail(request, FailureReason.DisallowedByRobotsTxt, "disallowed by robots.txt", null, null);
+                return;
+            }
+            if (robots.CrawlDelay(_options.RobotsUserAgent) is { } crawlDelay) _throttle.SetBaseDelay(host, crawlDelay);
+        }
+
+        // a throttled host: the request waits in the host's line and comes back through the queue when its slot comes
+        if (!_throttle.Enter(host, request)) return;
+
         await WaitForRateSlotAsync(token).ConfigureAwait(false);
 
         request.Attempts++;
@@ -249,10 +311,22 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             }
         }
 
+        if (_options.AutoThrottle && response != null)
+        {
+            if (verdict.Outcome == ValidationOutcome.Blocked || response.StatusCode is 429 or 503)
+            {
+                _throttle.OnOverloaded(host, RetryAfter(response), verdict.Reason ?? $"status {response.StatusCode}");
+            }
+            else if (verdict.Outcome == ValidationOutcome.Ok)
+            {
+                _throttle.OnSuccess(host);
+            }
+        }
+
         switch (verdict.Outcome)
         {
             case ValidationOutcome.Ok:
-                await HandleAsync(request, response!, token).ConfigureAwait(false);
+                await HandleAsync(request, response!, host, token).ConfigureAwait(false);
                 break;
 
             case ValidationOutcome.NotFound:
@@ -278,7 +352,7 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         }
     }
 
-    private async Task HandleAsync(ScrapeRequest request, PageResponse response, CancellationToken token)
+    private async Task HandleAsync(ScrapeRequest request, PageResponse response, string host, CancellationToken token)
     {
         var handler = _scraper.FindRoute(request.Label)!;
         var context = new ScrapeContext<TItem>(this, request, response, token);
@@ -294,7 +368,11 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             switch (ex)
             {
                 case RetryRequestException retry:
-                    if (retry.Blocked) ReportBlocked(request, response, retry.Message);
+                    if (retry.Blocked)
+                    {
+                        ReportBlocked(request, response, retry.Message);
+                        if (_options.AutoThrottle) _throttle.OnOverloaded(host, null, $"handler: {retry.Message}");
+                    }
                     RetryOrFail(request, $"handler asked to retry: {retry.Message}", response, retry);
                     break;
                 case NonRetryableException nonRetryable:
@@ -315,11 +393,18 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
             return;
         }
 
-        if (items != null)
+        if (items is not { Count: > 0 })
         {
+            Forget(request);
+        }
+        else
+        {
+            // with a state file the page stays there until the consumer has taken all its items
+            var tracked = _statePath != null ? request : null;
+            if (tracked != null) Volatile.Write(ref tracked.UnackedItems, items.Count);
             foreach (var item in items)
             {
-                await _items.Writer.WriteAsync(item, token).ConfigureAwait(false);
+                await _items.Writer.WriteAsync(new Emitted<TItem>(item, tracked), token).ConfigureAwait(false);
                 Stats.AddItem();
             }
         }
@@ -427,12 +512,13 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         var failed = new FailedRequest(request, reason, message, status, error);
         _failed.Enqueue(failed);
 
-        // a missing page is usual business; a handler error needs its stack trace
-        var level = reason == FailureReason.NotFound ? LogLevel.Information : LogLevel.Warning;
+        // a missing or disallowed page is usual business; a handler error needs its stack trace
+        var level = reason is FailureReason.NotFound or FailureReason.DisallowedByRobotsTxt ? LogLevel.Information : LogLevel.Warning;
         Logger.Log(level, reason == FailureReason.HandlerError ? error : null,
             "Failed {Url} ({Label}): {Reason}, {Message}", request.Url, request.Label, reason, message);
 
         _scraper.RaiseRequestFailed(failed);
+        Forget(request);
         Finish();
     }
 
@@ -446,6 +532,116 @@ internal sealed class ScraperRun<TItem> : IAsyncDisposable
         while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
         {
             Logger.LogInformation("Scraping: {Stats}", Stats);
+        }
+    }
+
+    // ---------------------------------------------------------------- state file
+
+    private void RestoreState(string path)
+    {
+        var snapshot = RunState.Load(path);
+        lock (_seen)
+        {
+            foreach (var key in snapshot.Seen) _seen.Add(key);
+        }
+
+        foreach (var saved in snapshot.Pending)
+        {
+            if (!UrlHelper.TryNormalize(saved.Url, out var url))
+            {
+                Logger.LogWarning("Skipped a request with a bad URL in the state file: {Url}", saved.Url);
+                continue;
+            }
+            if (_scraper.FindRoute(saved.Label) == null)
+            {
+                throw new InvalidOperationException($"The state file {path} has requests with label \"{saved.Label}\", and there is no handler for it");
+            }
+
+            // taken over as accepted: no duplicate check (its key is in the seen list) and no limits (an earlier run accepted it)
+            var request = saved with { Url = url };
+            lock (_seen)
+            {
+                _accepted++;
+                _unsaved.TryAdd(request, 0);
+                Interlocked.Increment(ref _pending);
+            }
+            Stats.AddEnqueued();
+            Stats.AddRestored();
+            Push(request);
+        }
+
+        Logger.LogInformation("Continuing the run saved in {Path}: {Pending} requests to finish, {Seen} pages seen", path, Stats.Restored, snapshot.Seen.Count);
+    }
+
+    private RunState.Snapshot TakeSnapshot()
+    {
+        lock (_seen)
+        {
+            return new RunState.Snapshot([.. _seen], [.. _unsaved.Keys]);
+        }
+    }
+
+    private async Task SaveLoopAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(_options.StateSaveInterval);
+        while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+        {
+            await SaveStateAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task SaveStateAsync()
+    {
+        await _saveLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var snapshot = TakeSnapshot();
+            await Task.Run(() => RunState.Save(_statePath!, snapshot)).ConfigureAwait(false);
+            Logger.LogDebug("State saved to {Path}: {Pending} pending, {Seen} seen", _statePath, snapshot.Pending.Count, snapshot.Seen.Count);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "The state could not be saved to {Path}", _statePath);
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// The workers stopped: save what is left to do, pages whose items the consumer has not taken yet included.
+    /// The file is deleted by <see cref="CompleteState"/> once the consumer has taken everything.
+    /// </summary>
+    private async Task FinishStateAsync()
+    {
+        if (_unsaved.IsEmpty)
+        {
+            DeleteState();
+            return;
+        }
+        await SaveStateAsync().ConfigureAwait(false);
+        if (Volatile.Read(ref _pending) > 0)
+        {
+            Logger.LogInformation("{Pending} requests not finished are saved in {Path}: the next run continues them", Volatile.Read(ref _pending), _statePath);
+        }
+    }
+
+    /// <summary>The consumer finished the loop: when nothing is left to do or to take, the state file is not needed any more.</summary>
+    public void CompleteState()
+    {
+        if (_statePath != null && _unsaved.IsEmpty) DeleteState();
+    }
+
+    private void DeleteState()
+    {
+        try
+        {
+            File.Delete(_statePath!);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "The state file {Path} of the finished run could not be deleted", _statePath);
         }
     }
 

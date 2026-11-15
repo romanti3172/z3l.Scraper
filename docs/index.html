@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>z3l.Scraper: web scraping engine for .NET</title>
+  <meta name="description" content="Block-aware web scraping engine for .NET 9 and 10: retries, block detection, per-host throttling, robots.txt, sitemaps and runs that survive a crash. HTML parsed with z3l.FastHtmlParser.">
+  <meta property="og:title" content="z3l.Scraper: web scraping engine for .NET">
+  <meta property="og:description" content="Scrape sites that fight back: blocks, 429s, cut-off pages and crashes are handled for you. You write what to take from a page.">
+  <meta property="og:image" content="icon.svg">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="logo" href="./"><img src="icon.svg" alt=""><span>Scraper</span></a>
+    <nav class="nav">
+      <a class="hide-sm" href="#trouble">When sites fight back</a>
+      <a class="hide-sm" href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+      <a class="hide-sm" href="https://github.com/romanti3172/z3l.Scraper#readme">Docs</a>
+      <a class="btn btn-ghost btn-sm" href="https://www.nuget.org/packages/z3l.Scraper">NuGet</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div class="eyebrow">.NET 9 &amp; .NET 10 · Retries · Blocks · Throttling · robots.txt · Sitemaps · Resume</div>
+    <h1>Scrape sites that <span class="hl">fight back</span></h1>
+    <p class="lead">z3l.Scraper is a crawling engine for .NET. You write what to take from a page; it deals with
+      403s, captchas, 429s, cut-off pages, flaky servers and crashed runs.</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="https://github.com/romanti3172/z3l.Scraper#quick-start">Get started</a>
+      <a class="btn btn-ghost" href="#pricing">Pricing</a>
+    </div>
+    <div class="install">
+      <code><span class="prompt">&gt; </span>dotnet add package z3l.Scraper</code>
+      <button class="copy" type="button" data-copy="dotnet add package z3l.Scraper">Copy</button>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>27k</b><span>pages/s engine speed, in-memory loader</span></div>
+      <div class="stat"><b>8</b><span>kinds of site trouble handled</span></div>
+      <div class="stat"><b>0</b><span>pages lost when a run resumes</span></div>
+      <div class="stat"><b>2</b><span>dependencies</span></div>
+    </div>
+  </div>
+
+  <section class="soft" id="code">
+    <div class="wrap code-grid">
+      <div>
+        <div class="section-head">
+          <h2>Your code is only what to take</h2>
+          <p>Queues, retries, checks, limits and state are the engine's job.</p>
+        </div>
+        <ul class="code-points">
+          <li><span class="dot">1</span><div><b>Labels and handlers</b><span>Every kind of page has its handler; links are queued with a label.</span></div></li>
+          <li><span class="dot">2</span><div><b>Checks before your code</b><span>Blocked, missing and cut-off pages never reach the handler: they are retried or reported.</span></div></li>
+          <li><span class="dot">3</span><div><b>Whole pages or nothing</b><span>Items of a handler that throws are dropped, so a retried page never gives duplicates.</span></div></li>
+          <li><span class="dot">4</span><div><b>Results as you go</b><span><code>await foreach</code> gets items while the crawl runs; a slow consumer slows the crawl down.</span></div></li>
+        </ul>
+      </div>
+<pre class="code"><code><span class="k">using var</span> loader = <span class="k">new</span> <span class="t">HttpPageLoader</span>();
+
+<span class="k">var</span> options = <span class="k">new</span> <span class="t">ScraperOptions</span> { RespectRobotsTxt = <span class="k">true</span> };
+options.Rules.Default.BlockedMarkers.<span class="m">Add</span>(<span class="s">"Just a moment"</span>);
+
+<span class="k">var</span> scraper = <span class="k">new</span> <span class="t">Scraper</span>&lt;<span class="t">Book</span>&gt;(loader, options)
+    .<span class="m">Route</span>(<span class="s">"list"</span>, ctx =&gt;
+    {
+        ctx.<span class="m">Enqueue</span>(ctx.Html.<span class="m">XPathValues</span>(<span class="s">"//h3/a/@href"</span>), <span class="s">"book"</span>);
+        ctx.<span class="m">Enqueue</span>(ctx.Html.<span class="m">XPathValue</span>(<span class="s">"//li[@class='next']/a/@href"</span>), <span class="s">"list"</span>);
+    })
+    .<span class="m">Route</span>(<span class="s">"book"</span>, ctx =&gt; ctx.<span class="m">Emit</span>(<span class="k">new</span> <span class="t">Book</span>(
+        ctx.Html.<span class="m">Find</span>(<span class="t">HtmlTag</span>.H1).<span class="m">Text</span>(),
+        ctx.Html.<span class="m">Find</span>(<span class="t">HtmlTag</span>.P, cls: <span class="s">"price_color"</span>).<span class="m">Text</span>())));
+
+<span class="k">await foreach</span> (<span class="k">var</span> book <span class="k">in</span> scraper.<span class="m">RunAsync</span>(
+    <span class="k">new</span> <span class="t">ScrapeRequest</span>(<span class="s">"https://books.toscrape.com/"</span>, <span class="s">"list"</span>)))
+{
+    <span class="m">Save</span>(book);    <span class="c">// streamed while the crawl runs</span>
+}</code></pre>
+    </div>
+  </section>
+
+  <section id="trouble">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>When the site fights back</h2>
+        <p>Every case below is covered by the test suite; most run against a local shop that misbehaves on purpose.</p>
+      </div>
+      <div class="table-scroll">
+        <table class="trouble">
+          <thead><tr><th>The site does</th><th>z3l.Scraper</th></tr></thead>
+          <tbody>
+            <tr><td>403, 429, a captcha, "Just a moment..."</td><td>Recognised as a block: your loader is told so it can change the proxy or session, the host slows down, the page is retried.</td></tr>
+            <tr><td>429 with Retry-After</td><td>The whole host pauses as long as asked; pages of other hosts keep loading.</td></tr>
+            <tr><td>500, 503, a timeout, a dropped connection</td><td>Retried with exponential backoff and jitter, up to the limit you set.</td></tr>
+            <tr><td>A page cut off half-way, an empty body, broken JSON</td><td>Retried: <code>ExpectedContent.Html</code>, <code>Json</code>, <code>MustContain</code> per kind of page.</td></tr>
+            <tr><td>404 or "Product not found"</td><td>Reported as not found after one more try, not retried forever.</td></tr>
+            <tr><td>Prices hidden for bots: looks fine, isn't</td><td>Your handler throws <code>RetryRequestException</code>: retried and counted as a block.</td></tr>
+            <tr><td>robots.txt rules and Crawl-delay</td><td>Disallowed pages are skipped and loads are spaced, with <code>RespectRobotsTxt</code>.</td></tr>
+            <tr><td>Your process dies at page 40,000</td><td>The next run continues from the state file. Pages whose items you had not taken are done again: nothing is lost.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="soft" id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Everything a crawl needs</h2>
+        <p>In one package of about 2,700 lines, with tests for every case.</p>
+      </div>
+      <div class="features">
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h7"/><path d="m17 15 3 3-3 3"/></svg></div>
+          <h3>Queue with priorities</h3>
+          <p>De-duplicated by method, URL and body. Link depth, <code>MaxDepth</code>, <code>MaxRequests</code>, <code>MaxRequestsPerMinute</code>, time limits.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+          <h3>Response checks</h3>
+          <p>Blocked, not found, incomplete: status codes, markers and your own checks, per label, before your handler runs.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></div>
+          <h3>Polite retries</h3>
+          <p>Backoff with jitter, Retry-After, and a per-host throttle that slows a struggling site down and speeds up again.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18v14H3z"/><path d="M7 9h6M7 13h10"/></svg></div>
+          <h3>Sitemaps and robots.txt</h3>
+          <p>Sitemap indexes, gzip and text sitemaps in one call; robots.txt matched by RFC 9309 rules, with Crawl-delay.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg></div>
+          <h3>Runs that survive a crash</h3>
+          <p>Set <code>StatePath</code>: the queue is saved as it goes and the next run continues. At least once, never lost.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/></svg></div>
+          <h3>Any loader</h3>
+          <p>HttpClient built in; plug a browser, a proxy pool or a loader farm with <code>IPageLoader</code>. Trimming and AOT compatible.</p>
+        </div>
+      </div>
+      <p class="honest"><b>What it is not.</b> It does not run JavaScript: for pages built in the browser, plug a browser loader
+        (Playwright, Selenium, a remote farm) into <code>IPageLoader</code>. The queue lives in one process and its state file,
+        not in a distributed store. It has no proxy pool inside: your loader brings the proxies, and the scraper tells it which ones got blocked.</p>
+    </div>
+  </section>
+
+  <section id="pricing">
+    <div class="wrap">
+      <div class="section-head center">
+        <h2>Simple, one-time pricing</h2>
+        <p>Free for individuals and small companies. Larger organizations pay once and use it forever.</p>
+      </div>
+      <div class="pricing">
+        <div class="card plan">
+          <h3>Community</h3>
+          <p class="who">Individuals and organizations under USD 1M annual revenue and under 100 employees.</p>
+          <div class="price">$0 <small>free forever</small></div>
+          <ul>
+            <li>Commercial use included</li>
+            <li>All features, no limits</li>
+            <li>All future versions</li>
+            <li>Community support on GitHub</li>
+          </ul>
+          <a class="btn btn-ghost" href="https://www.nuget.org/packages/z3l.Scraper">Install from NuGet</a>
+          <p class="fine">No registration, no license key.</p>
+        </div>
+        <div class="card plan featured">
+          <span class="badge">For companies over $1M or 100+ people</span>
+          <h3>Commercial</h3>
+          <p class="who">Organizations with USD 1M or more annual revenue, or 100 or more employees, including affiliates.</p>
+          <div class="price">$1,000 <small>one-time, per organization</small></div>
+          <ul>
+            <li>Perpetual license, all current and future versions</li>
+            <li>Unlimited developers, apps, servers and deployments</li>
+            <li>Invoice and license certificate for your records</li>
+            <li>Priority email support</li>
+          </ul>
+          <a class="btn btn-primary" href="mailto:romanti3172@gmail.com?subject=z3l.Scraper%20commercial%20license">Buy commercial license</a>
+          <p class="fine">z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="soft" id="faq">
+    <div class="wrap">
+      <div class="section-head center"><h2>Questions</h2></div>
+      <div class="faq">
+        <details>
+          <summary>Do I need a commercial license?</summary>
+          <p>Only if your organization, together with its affiliates, has USD 1,000,000 or more in annual revenue, or 100 or more employees and contractors. Everyone else uses it free, including in commercial products.</p>
+        </details>
+        <details>
+          <summary>Do I need a license for z3l.FastHtmlParser too?</summary>
+          <p>The scraper parses pages with <a href="https://romanti3172.github.io/z3l.FastHtmlParser/">z3l.FastHtmlParser</a>, which has its own license on the same terms: free under the thresholds, a one-time commercial license above them.</p>
+        </details>
+        <details>
+          <summary>Does it run JavaScript?</summary>
+          <p>No. The built-in loader is HttpClient. For pages built by scripts, implement <code>IPageLoader</code> with Playwright, Selenium or a remote browser farm; the queue, checks and retries stay the same.</p>
+        </details>
+        <details>
+          <summary>What happens if my process crashes?</summary>
+          <p>With <code>StatePath</code> set, the run state is saved every 30 seconds and when the run stops. The next run continues: pages being loaded and items you had not taken yet are done again, nothing is lost.</p>
+        </details>
+        <details>
+          <summary>Does it obey robots.txt?</summary>
+          <p>When you turn on <code>RespectRobotsTxt</code>: robots.txt of each host is read once, disallowed pages are skipped and its Crawl-delay spaces the loads. Scraping within the law and the sites' terms is up to you.</p>
+        </details>
+        <details>
+          <summary>Does the library phone home or check a license key?</summary>
+          <p>No. There is no license key, no telemetry and no network access other than the pages you load.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta">
+    <div class="wrap">
+      <h2>Point it at a site</h2>
+      <p>Install the package and run the quick start against books.toscrape.com, a sandbox made for scraping practice.</p>
+      <div class="install">
+        <code><span class="prompt">&gt; </span>dotnet add package z3l.Scraper</code>
+        <button class="copy" type="button" data-copy="dotnet add package z3l.Scraper">Copy</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>© 2026 z3l</span>
+    <nav>
+      <a href="https://github.com/romanti3172/z3l.Scraper/blob/main/LICENSE.md">License</a>
+      <a href="https://romanti3172.github.io/z3l.FastHtmlParser/">z3l.FastHtmlParser</a>
+      <a href="mailto:romanti3172@gmail.com">Contact</a>
+      <a href="https://github.com/romanti3172/z3l.Scraper">GitHub</a>
+      <a href="https://www.nuget.org/packages/z3l.Scraper">NuGet</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll(".copy").forEach(btn => btn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(btn.dataset.copy); btn.textContent = "Copied"; }
+    catch { btn.textContent = "Select & copy"; }
+    setTimeout(() => btn.textContent = "Copy", 1500);
+  }));
+</script>
+</body>
+</html>

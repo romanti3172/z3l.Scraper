@@ -70,7 +70,16 @@ public sealed record ScrapeRequest
     /// <summary>Number of load attempts made so far (1 in the first handler call).</summary>
     public int Attempts { get; internal set; }
 
+    /// <summary>Link depth: 0 for start requests, one more than the page whose handler queued it.</summary>
+    public int Depth { get; internal set; }
+
     internal int NotFoundCount { get; set; }
+
+    /// <summary>The request already holds a load slot of its throttled host (it waited in the host's line).</summary>
+    internal bool HasThrottleSlot { get; set; }
+
+    /// <summary>With a state file: items of this page the consumer has not taken yet; the page stays in the file until it is 0.</summary>
+    internal int UnackedItems;
 
     internal string GetUniqueKey()
     {

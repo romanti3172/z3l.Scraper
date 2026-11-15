@@ -42,6 +42,48 @@ public sealed class ScraperOptions
     public int? MaxRequestsPerMinute { get; set; }
 
     /// <summary>
+    /// Deepest link to follow: start requests have depth 0, the pages they queue 1, and so on. Deeper requests are skipped
+    /// and counted in <see cref="ScraperStats.SkippedByLimit"/>. Null for no limit.
+    /// </summary>
+    public int? MaxDepth { get; set; }
+
+    /// <summary>
+    /// Slows down a host that is overloaded or blocks: after a 429 or 503, or a blocked response, all requests to that host
+    /// wait in a line and load one at a time with a delay that doubles with each such answer (up to <see cref="MaxThrottleDelay"/>)
+    /// and shrinks again with successful loads. A Retry-After header pauses the whole host. On by default.
+    /// </summary>
+    public bool AutoThrottle { get; set; } = true;
+
+    /// <summary>Longest delay between loads of a throttled host (and the longest robots.txt Crawl-delay honoured).</summary>
+    public TimeSpan MaxThrottleDelay { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Load robots.txt of each host first and skip what it disallows (failed with <see cref="FailureReason.DisallowedByRobotsTxt"/>);
+    /// its Crawl-delay spaces the loads of that host. Off by default.
+    /// </summary>
+    public bool RespectRobotsTxt { get; set; }
+
+    /// <summary>Product token matched against the User-agent lines of robots.txt; groups for "*" apply when none matches.</summary>
+    public string RobotsUserAgent { get; set; } = "z3l-scraper";
+
+    /// <summary>
+    /// File that keeps the run state: the requests not finished yet and the keys of the pages already seen. It is written every
+    /// <see cref="StateSaveInterval"/> and when the run stops; a run started with an existing file continues where the last one
+    /// stopped; the file is deleted when a run has finished all its pages and the consumer has taken all the items.
+    /// <para>
+    /// A page leaves the file only when its items are taken: an item counts as taken when the <c>await foreach</c> loop asks for
+    /// the next one, so save each item in the loop body. Pages in work or not taken when the process died are done again, so
+    /// their items can come twice (at least once, never lost). <c>RunToListAsync</c> keeps the items in memory: a crash loses them.
+    /// </para>
+    /// With a state file, <see cref="ScrapeRequest.UserData"/> must be a string, a number, a bool, a Guid, a DateTime,
+    /// a DateTimeOffset or a JsonElement. Null: no state is kept.
+    /// </summary>
+    public string? StatePath { get; set; }
+
+    /// <summary>How often the state file is written while the run goes.</summary>
+    public TimeSpan StateSaveInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Retry the request when the handler throws (by default the request fails at once).
     /// <see cref="RetryRequestException"/> is always retried and <see cref="NonRetryableException"/> never is.
     /// </summary>
@@ -78,5 +120,9 @@ public sealed class ScraperOptions
         }
         if (MaxRequests is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequests), MaxRequests, "Must be 1 or more");
         if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
+        if (MaxDepth is < 0) throw new ArgumentOutOfRangeException(nameof(MaxDepth), MaxDepth, "Must be 0 or more");
+        if (MaxThrottleDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxThrottleDelay), MaxThrottleDelay, "Must be positive");
+        if (StateSaveInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(StateSaveInterval), StateSaveInterval, "Must be positive");
+        if (RespectRobotsTxt && string.IsNullOrWhiteSpace(RobotsUserAgent)) throw new ArgumentException("RobotsUserAgent must not be empty", nameof(RobotsUserAgent));
     }
 }

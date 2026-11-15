@@ -26,6 +26,7 @@ public sealed class IntegrationTests
             RetryDelay = TimeSpan.FromMilliseconds(50),
             RequestTimeout = TimeSpan.FromSeconds(1),
             ProgressInterval = null,
+            MaxThrottleDelay = TimeSpan.FromMilliseconds(100),   // the 429 and 503 throttle the shop; keep the pauses short
         };
         options.Rules.Default.Content = ExpectedContent.Html;
         options.Rules.Default.BlockedMarkers.Add("Just a moment");

@@ -17,11 +17,14 @@
 
   <PropertyGroup Label="Package">
     <PackageId>z3l.Scraper</PackageId>
-    <Version>0.1.0-preview.2</Version>
+    <Version>0.1.0-preview.3</Version>
     <Authors>z3l</Authors>
     <Copyright>Copyright © 2026 z3l</Copyright>
-    <Description>Block-aware web scraping engine for .NET 9/10: request queue with priorities and de-duplication, retries with backoff, response validation (blocked, not found, incomplete pages), label routing, async handlers and streamed typed results. Pluggable page loaders (HttpClient built in). HTML is parsed with z3l.FastHtmlParser.</Description>
-    <PackageTags>scraper;web-scraping;webscraping;crawler;web-crawler;crawling;spider;scraping;html;parser;retry;proxy;dotnet;csharp;net9;net10</PackageTags>
+    <Description>Block-aware web scraping engine for .NET 9/10: request queue with priorities and de-duplication, retries with backoff, response checks (blocked, not found, cut-off pages), per-host throttling on 429/503, robots.txt, sitemaps, link depth, runs that resume after a crash, label routing, async handlers and streamed typed results. Pluggable page loaders (HttpClient built in). HTML is parsed with z3l.FastHtmlParser.</Description>
+    <PackageTags>scraper;web-scraping;webscraping;crawler;web-crawler;crawling;spider;scraping;html;parser;retry;throttling;robots.txt;sitemap;proxy;dotnet;csharp;net9;net10</PackageTags>
+    <PackageProjectUrl>https://romanti3172.github.io/z3l.Scraper/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/romanti3172/z3l.Scraper</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>

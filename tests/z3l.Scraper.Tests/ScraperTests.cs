@@ -6,7 +6,14 @@ namespace z3l.Scraper.Tests;
 [TestClass]
 public sealed class ScraperTests
 {
-    internal static ScraperOptions FastOptions() => new() { RetryDelay = TimeSpan.Zero, ProgressInterval = null, MaxRetries = 2 };
+    /// <summary>No retry delays and throttle pauses of 50 ms at most, so tests about other things run fast.</summary>
+    internal static ScraperOptions FastOptions() => new()
+    {
+        RetryDelay = TimeSpan.Zero,
+        ProgressInterval = null,
+        MaxRetries = 2,
+        MaxThrottleDelay = TimeSpan.FromMilliseconds(50),
+    };
 
     internal static string Html(string body) => $"<html><body>{body}</body></html>";
 
@@ -518,7 +525,7 @@ public sealed class ScraperTests
         Assert.AreEqual(10, result.Stats.Enqueued);
         Assert.AreEqual(10, result.Stats.Succeeded);
         Assert.IsGreaterThan(0, result.Stats.SkippedByLimit);
-        StringAssert.Contains(result.Stats.ToString(), "over MaxRequests");
+        StringAssert.Contains(result.Stats.ToString(), "over limits");
     }
 
     [TestMethod]

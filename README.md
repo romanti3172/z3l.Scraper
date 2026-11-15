@@ -16,7 +16,12 @@ rate and time limits, and streaming typed results while the scraping goes on. HT
   so a retried page never gives duplicates.
 - **Streaming results.** `await foreach` over items as they are scraped; a slow consumer slows the scraper down
   instead of filling the memory.
-- **Politeness and limits.** `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`, `MaxRunDuration`.
+- **Politeness and limits.** A host that answers 429 / 503 or blocks is slowed down by itself while other hosts keep
+  full speed; robots.txt and its Crawl-delay on request; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
+  `MaxDepth`, `MaxRunDuration`.
+- **Sitemaps.** Sitemap indexes, gzipped and text sitemaps in one call: `ctx.EnqueueSitemap("product")`.
+- **Runs that survive a crash.** With `StatePath` the queue is saved as it goes and the next run continues;
+  pages in work or not taken yet are done again, nothing is lost.
 - **De-duplication** by method, URL (without fragment) and body: POST pages with different bodies are different pages.
 - **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser, a proxy pool or a
   loader farm. `IBlockAwarePageLoader` is told which responses were blocked, so it can retire a proxy or a session.
@@ -148,6 +153,62 @@ Checks run in this order; the first that matches decides:
 String checks ignore case. A blocked response or a 429 with `Retry-After` waits as long as the server asks
 (up to `MaxRetryDelay`).
 
+## Throttling
+
+A host that answers 429 or 503, or whose responses are blocked (also when a handler throws
+`RetryRequestException(..., blocked: true)`), is slowed down as a whole: its requests wait in a line and load one at a time,
+1 s apart at first, twice as long after each next such answer (up to `MaxThrottleDelay`, 1 min), and the delay shrinks
+again by 10 % with each good page. A `Retry-After` pauses the host as long as it asks. Requests to other hosts keep
+going at full speed meanwhile: the line holds requests, not workers. `AutoThrottle = false` turns it off.
+
+## Sitemaps and robots.txt
+
+```csharp
+scraper
+    .Route("sitemap", ctx => ctx.EnqueueSitemap("product",                 // pages with "product", nested sitemaps with "sitemap"
+        filter: page => page.LastModified > DateTimeOffset.UtcNow.AddDays(-7)))
+    .Route("product", ctx => ...);
+
+await foreach (var item in scraper.RunAsync(new ScrapeRequest("https://shop.example/sitemap.xml", "sitemap"))) { }
+
+ctx.ParseSitemap();                       // Urls (Url, LastModified) and nested Sitemaps, if you want to look first
+RobotsTxt.Parse(text).Sitemaps;           // the "Sitemap:" lines of a robots.txt
+```
+
+Sitemaps may be XML (`urlset`, `sitemapindex`), gzipped (`.xml.gz`) or a text list of URLs.
+
+With `RespectRobotsTxt = true` the scraper loads robots.txt of each host once, with your loader, before its first page:
+disallowed pages fail with `FailureReason.DisallowedByRobotsTxt` without being loaded, and `Crawl-delay` spaces the
+loads of the host. Rules are matched as RFC 9309 says (longest match, Allow wins a tie, `*` and `$`) for the group of
+`RobotsUserAgent` ("z3l-scraper"), or for `*`. A missing robots.txt allows everything; one that cannot be loaded
+(5xx, network error) is logged and the host is crawled without rules.
+
+## Depth
+
+`ctx.Request.Depth` is 0 for start requests and one more than the page that queued it. `MaxDepth` skips deeper links
+(a page found too deep is still taken if another path reaches it closer).
+
+## Resuming a run
+
+```csharp
+var options = new ScraperOptions { StatePath = "state/shop.json" };
+
+await foreach (var item in scraper.RunAsync(startRequests))
+{
+    await db.SaveAsync(item);      // an item counts as taken when the loop asks for the next one
+}
+```
+
+The state file holds the requests not finished and the keys of the pages seen. It is written every
+`StateSaveInterval` (30 s) and when the run stops (time limit, cancellation, `break`, an exception in your loop), and
+deleted when the run has finished everything and you have taken every item. Start the program again with the same
+`StatePath` and the run continues where it stopped; the start requests are skipped as already seen.
+
+Pages being loaded when the process died, and pages whose items you had not taken yet, are done again: you get every
+item at least once, so make saving idempotent (an upsert by URL). `RunToListAsync` keeps items in memory, so a crash
+loses them; stream with `RunAsync` when you keep state. With a state file, `UserData` must be a string, a number,
+a bool, a Guid, a DateTime(Offset) or a `JsonElement` (`JsonSerializer.SerializeToElement(category)`).
+
 ## Options
 
 | Option | Default | |
@@ -155,6 +216,10 @@ String checks ignore case. A blocked response or a 429 with `Retry-After` waits 
 | `MaxConcurrency` | 8 | requests loaded and handled at once |
 | `MaxRequestsPerMinute` | none | loads spread evenly, retries included |
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
+| `MaxDepth` | none | deepest link to follow; start requests are depth 0 |
+| `AutoThrottle`, `MaxThrottleDelay` | on, 1 min | slow down a host that answers 429 / 503 or blocks |
+| `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
+| `StatePath`, `StateSaveInterval` | none, 30 s | save the run and continue it after a crash |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
@@ -173,7 +238,7 @@ await foreach (var item in scraper.RunAsync(requests, cancellationToken)) { ... 
 // or collect
 var result = await scraper.RunToListAsync(requests);
 result.Items;    // emitted items
-result.Failed;   // FailedRequest: Request, Reason (RetriesExhausted / NotFound / HandlerError / NonRetryable), Message, StatusCode, Exception
+result.Failed;   // FailedRequest: Request, Reason (RetriesExhausted / NotFound / HandlerError / NonRetryable / DisallowedByRobotsTxt), Message, StatusCode, Exception
 result.Stats;    // counters
 
 scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.Request.Url, failed.Message);
@@ -233,4 +298,4 @@ var scraper = new Scraper<Book>(loader, options, loggerFactory.CreateLogger("scr
 ## License
 
 Free for companies under USD 1M annual revenue and under 100 employees; others need a commercial license.
-See [LICENSE.md](LICENSE.md).
+See [LICENSE.md](LICENSE.md). z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.
