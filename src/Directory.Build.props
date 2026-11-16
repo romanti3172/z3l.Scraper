@@ -1,0 +1,33 @@
+<Project>
+
+  <!-- Settings of every package in src: one version for all of them -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- NuGet audit: a new advisory on a dependency or a build tool is reported, but does not break the build -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <Version>0.1.0-preview.6</Version>
+    <Authors>z3l</Authors>
+    <Copyright>Copyright © 2026 z3l</Copyright>
+    <PackageProjectUrl>https://romanti3172.github.io/z3l.Scraper/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/romanti3172/z3l.Scraper</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\LICENSE.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

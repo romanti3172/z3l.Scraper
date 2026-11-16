@@ -32,7 +32,7 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 ## Install
 
 ```
-dotnet add package z3l.Scraper
+dotnet add package z3l.Scraper --prerelease
 ```
 
 ## Quick start
@@ -186,9 +186,9 @@ options.Rules[PageType.Item].MustContain.Add("itemprop=\"price\"");
 options.Rules[PageType.Item].NotFoundMarkers.Add("Product not found");
 options.Rules["reviews-api"].Content = ExpectedContent.Json;
 
-// your own check
-options.Rules[PageType.Item].Custom = (request, response) =>
-    response.Text.Length < 5000 ? ValidationResult.Retry("page too short") : ValidationResult.Ok;
+// your own check; text is the page read in place (no string), valid during the call
+options.Rules[PageType.Item].Custom = (request, response, text) =>
+    text.Length < 5000 ? ValidationResult.Retry("page too short") : ValidationResult.Ok;
 ```
 
 Checks run in this order; the first that matches decides:
@@ -225,10 +225,40 @@ https://proxy.example:443
 http, https, socks4, socks4a and socks5 proxies, with or without a login, are handled by .NET itself; every proxy has
 its own connections and cookies. Proxies are given out in turn. When a site blocks an answer, the proxy that loaded it
 rests for that site only, as `ProxyBlockPolicy` says: `Ignore`, `Block10Minutes`, `Block1Hour` (the default),
-`Block1Day` or `Remove`. After `MaxConsecutiveFailures` (3) failures in a row (no connection, 407) a proxy rests for every
-site for `DeadProxyPause` (10 min). When every proxy rests for a site, its loads wait for the first one to come back,
+`Block1Day` or `Remove`.
+
+A failure (no connection, a timeout, 407) or a bad response (the proxy answered, but not with the page: its own page, a
+cut-off one, the page fails `MustContain`, the format or another check, comes with a 5xx, or the handler throws
+`RetryRequestException`) puts the proxy after the clean ones: it is taken only when no clean proxy is free. Successes do
+not put a proxy ahead, so the turn stays even and no proxy gets more loads at once than the others. After
+`MaxConsecutiveFailures` (3) failures in a row a proxy rests for every site for `DeadProxyPause` (10 min); after
+`MaxConsecutiveBadResponses` (3) bad responses in a row on a site it rests for that site for `BadResponsePause` (10 min).
+An error older than its pause is forgotten, a good page starts the count again. Bad responses are counted per site, so a
+broken site does not take the proxies from the others; 429 and 503 are left to the throttling. When every proxy rests for a site, its loads wait for the first one to come back,
 no longer than `RequestTimeout`. The file is read again when it changes; proxies that stay keep their rests.
 `proxies.Status()` and `proxies.ToString()` show what each proxy did.
+
+The list can also come from a proxy service: the URL answers with the same lines or with a JSON array of them, and is read
+again every 5 minutes in the background (a failed read keeps the old list):
+
+```csharp
+var api = new HttpClient { DefaultRequestHeaders = { { "X-Api-Key", key } } };
+var proxies = await ProxyList.FromUrlAsync(new Uri("https://proxies.example/list"), refreshInterval: TimeSpan.FromMinutes(5), httpClient: api);
+```
+
+### User agents
+
+```csharp
+using var loader = new HttpPageLoader(new HttpPageLoaderOptions
+{
+    Proxies = ProxyList.FromFile("proxies.txt"),
+    UserAgents = UserAgentList.FromFile("useragents.txt"),     // or await UserAgentList.FromUrlAsync(url)
+});
+```
+
+One user agent per line, `#` for comments; the file is read again when it changes. With proxies every proxy takes one
+user agent and keeps it, as it keeps its cookies, so a site sees one browser per address; without proxies every request
+takes the next one. A `User-Agent` in `DefaultHeaders` or in the request still wins.
 
 ## Throttling
 
@@ -338,13 +368,16 @@ items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; 
 using var loader = new HttpPageLoader(new HttpPageLoaderOptions
 {
     Proxies = ProxyList.FromFile("proxies.txt"),           // or Proxy = new WebProxy(...) for one; none: the system settings
-    UserAgent = "...",
+    UserAgent = "...",                                     // or UserAgents = UserAgentList.FromFile("useragents.txt")
     DefaultHeaders = { ["Accept-Language"] = "de-DE" },
     MaxResponseBytes = 10 * 1024 * 1024,                   // bigger responses fail without retries
 });
 
 // or your own client (IHttpClientFactory, Polly...)
 var loader = new HttpPageLoader(httpClient);
+
+// or a headless browser: the z3l.Scraper.Playwright package
+await using var loader = new PlaywrightPageLoader(new PlaywrightPageLoaderOptions { Channel = "chrome", WaitForSelector = "div.product" });
 
 // or anything else
 public sealed class BrowserLoader : IBlockAwarePageLoader
@@ -359,11 +392,22 @@ public sealed class BrowserLoader : IBlockAwarePageLoader
     {
         // retire the proxy / browser session that got this response
     }
+
+    // optional: the response was not the page (failed the checks, a 5xx, the handler asked for a retry) / it was the page /
+    // the last load of the request ran out of RequestTimeout
+    public void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason) { }
+    public void ReportGoodResponse(ScrapeRequest request, PageResponse response) { }
+    public void ReportTimeout(ScrapeRequest request) { }
 }
 ```
 
 A loader returns any HTTP status as a normal result and throws only when there is no response; the scraper
-retries that. A loader throws `NonRetryableException` when another attempt cannot help.
+retries that. A loader throws `NonRetryableException` when another attempt cannot help. A loader of your own can
+rotate proxies with `ProxyList` too: `AcquireAsync(host)` gives the next proxy that may load from the site, and
+`ReportSuccess`, `ReportFailure`, `ReportBlocked`, `ReportBadResponse` and `ReportGoodResponse` tell the list how it went.
+
+[z3l.Scraper.Playwright](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
+browser context per proxy.
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,
@@ -381,4 +425,4 @@ var scraper = new Scraper(loader, options, loggerFactory.CreateLogger("scraper")
 ## License
 
 Free for companies under USD 1M annual revenue and under 100 employees; others need a commercial license.
-See [LICENSE.md](LICENSE.md). z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.
+See [LICENSE.md](https://github.com/romanti3172/z3l.Scraper/blob/main/LICENSE.md). z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.

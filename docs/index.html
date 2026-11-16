@@ -37,8 +37,8 @@
       <a class="btn btn-ghost" href="#pricing">Pricing</a>
     </div>
     <div class="install">
-      <code><span class="prompt">&gt; </span>dotnet add package z3l.Scraper</code>
-      <button class="copy" type="button" data-copy="dotnet add package z3l.Scraper">Copy</button>
+      <code><span class="prompt">&gt; </span>dotnet add package z3l.Scraper --prerelease</code>
+      <button class="copy" type="button" data-copy="dotnet add package z3l.Scraper --prerelease">Copy</button>
     </div>
 
     <div class="stats">
@@ -97,7 +97,8 @@
           <thead><tr><th>The site does</th><th>z3l.Scraper</th></tr></thead>
           <tbody>
             <tr><td>403, 429, a captcha, "Just a moment..."</td><td>Recognised as a block: the proxy that got it rests for that site (an hour by default), the host slows down, the page is retried through another proxy.</td></tr>
-            <tr><td>A proxy dies or wants a login</td><td>After three failures in a row it rests for every site; the others carry on.</td></tr>
+            <tr><td>A proxy dies, hangs or wants a login</td><td>One failure puts it after the clean proxies; three in a row and it rests for every site.</td></tr>
+            <tr><td>A proxy answers with its own page</td><td>The page fails <code>MustContain</code> and is retried; the proxy goes after the clean ones for that site, three such answers in a row and it rests there.</td></tr>
             <tr><td>429 with Retry-After</td><td>The whole host pauses as long as asked; pages of other hosts keep loading.</td></tr>
             <tr><td>500, 503, a timeout, a dropped connection</td><td>Retried with exponential backoff and jitter, up to the limit you set.</td></tr>
             <tr><td>A page cut off half-way, an empty body, broken JSON</td><td>Retried: <code>ExpectedContent.Html</code>, <code>Json</code>, <code>MustContain</code> per kind of page.</td></tr>
@@ -230,8 +231,8 @@
       <h2>Point it at a site</h2>
       <p>Install the package and run the quick start against books.toscrape.com, a sandbox made for scraping practice.</p>
       <div class="install">
-        <code><span class="prompt">&gt; </span>dotnet add package z3l.Scraper</code>
-        <button class="copy" type="button" data-copy="dotnet add package z3l.Scraper">Copy</button>
+        <code><span class="prompt">&gt; </span>dotnet add package z3l.Scraper --prerelease</code>
+        <button class="copy" type="button" data-copy="dotnet add package z3l.Scraper --prerelease">Copy</button>
       </div>
     </div>
   </section>

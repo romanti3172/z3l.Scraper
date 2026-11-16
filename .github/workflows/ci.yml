@@ -27,12 +27,17 @@ jobs:
       - name: Build
         run: dotnet build -c Release
 
+      # the browser for z3l.Scraper.Playwright.Tests; without it those tests are inconclusive
+      - name: Install Chromium
+        shell: pwsh
+        run: tests/z3l.Scraper.Playwright.Tests/bin/Release/net10.0/playwright.ps1 install --with-deps chromium
+
       - name: Test
         run: dotnet test -c Release --no-build
 
       - name: Pack
         if: matrix.os == 'ubuntu-latest'
-        run: dotnet pack src/z3l.Scraper -c Release --no-build -o artifacts
+        run: dotnet pack -c Release --no-build -o artifacts
 
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'ubuntu-latest'

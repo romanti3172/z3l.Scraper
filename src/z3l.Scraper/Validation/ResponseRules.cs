@@ -53,8 +53,17 @@ public sealed class ResponseRules
     /// Your own check, run after the others. Return <see cref="ValidationResult.Ok"/> to accept the page
     /// or any other result to reject it.
     /// </summary>
-    public Func<ScrapeRequest, PageResponse, ValidationResult>? Custom { get; set; }
+    public ResponseCheck? Custom { get; set; }
 }
+
+/// <summary>A check of a loaded page.</summary>
+/// <param name="request">The request.</param>
+/// <param name="response">The response.</param>
+/// <param name="text">
+/// The page text, read in place without making a string; empty for <see cref="ExpectedContent.Binary"/> and empty bodies.
+/// Valid only during the call: copy what you need (<c>text.ToString()</c>).
+/// </param>
+public delegate ValidationResult ResponseCheck(ScrapeRequest request, PageResponse response, ReadOnlySpan<char> text);
 
 /// <summary>Response rules by label.</summary>
 public sealed class ResponseRulesCollection
@@ -112,7 +121,7 @@ public sealed class ResponseRulesCollection
             NotFoundMarkers: Merge(d.NotFoundMarkers, own?.NotFoundMarkers),
             BlockedMarkers: Merge(d.BlockedMarkers, own?.BlockedMarkers),
             BlockedStatusCodes: [.. d.BlockedStatusCodes.Concat(own?.BlockedStatusCodes ?? [])],
-            Custom: [.. new[] { d.Custom, own?.Custom }.OfType<Func<ScrapeRequest, PageResponse, ValidationResult>>()]);
+            Custom: [.. new[] { d.Custom, own?.Custom }.OfType<ResponseCheck>()]);
     }
 }
 
@@ -126,4 +135,4 @@ internal sealed record EffectiveRules(
     string[] NotFoundMarkers,
     string[] BlockedMarkers,
     HashSet<int> BlockedStatusCodes,
-    Func<ScrapeRequest, PageResponse, ValidationResult>[] Custom);
+    ResponseCheck[] Custom);

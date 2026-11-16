@@ -53,6 +53,17 @@ internal sealed class FakeLoader : IBlockAwarePageLoader
 
     public void ReportBlocked(ScrapeRequest request, PageResponse response, string reason) => Blocked.Enqueue(request.Url);
 
+    public ConcurrentQueue<string> Bad { get; } = new();
+    public ConcurrentQueue<string> Good { get; } = new();
+
+    public void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason) => Bad.Enqueue($"{request.Url} {reason}");
+
+    public void ReportGoodResponse(ScrapeRequest request, PageResponse response) => Good.Enqueue(request.Url);
+
+    public ConcurrentQueue<string> TimedOut { get; } = new();
+
+    public void ReportTimeout(ScrapeRequest request) => TimedOut.Enqueue(request.Url);
+
     private static void InterlockedMax(ref int target, int value)
     {
         int current;
