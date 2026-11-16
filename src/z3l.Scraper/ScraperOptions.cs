@@ -5,8 +5,17 @@ namespace z3l.Scraper;
 /// <summary>Scraper settings. Change them before <c>RunAsync</c>; a running scrape uses the values it started with.</summary>
 public sealed class ScraperOptions
 {
-    /// <summary>Requests loaded and handled at the same time.</summary>
+    /// <summary>
+    /// Requests loaded and handled at the same time. With an <see cref="Loading.IQueuePageLoader"/> every request goes to the queue
+    /// at once, and this limits only the handlers that run at once.
+    /// </summary>
     public int MaxConcurrency { get; set; } = 8;
+
+    /// <summary>
+    /// With an <see cref="Loading.IQueuePageLoader"/>: loaded pages that may wait for a handler. Above it the loader is paused and
+    /// the results wait in its queue, so pages that come faster than the handlers take them do not fill the memory.
+    /// </summary>
+    public int MaxLoadedNotHandled { get; set; } = 100;
 
     /// <summary>Retries after a failed load, a broken page or a blocked response (the first attempt is not counted).</summary>
     public int MaxRetries { get; set; } = 5;
@@ -23,7 +32,10 @@ public sealed class ScraperOptions
     /// <summary>Longest retry delay.</summary>
     public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromMinutes(1);
 
-    /// <summary>Time for one load; a slower load is cancelled and retried. <see cref="Timeout.InfiniteTimeSpan"/> for no limit.</summary>
+    /// <summary>
+    /// Time for one load; a slower load is cancelled and retried. <see cref="Timeout.InfiniteTimeSpan"/> for no limit.
+    /// Not used with an <see cref="Loading.IQueuePageLoader"/>: a load may wait in its queue for any time.
+    /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
     /// <summary>Stop after this time and return what was scraped. Null for no limit.</summary>
@@ -50,9 +62,15 @@ public sealed class ScraperOptions
     /// <summary>
     /// Slows down a host that is overloaded or blocks: after a 429 or 503, or a blocked response, all requests to that host
     /// wait in a line and load one at a time with a delay that doubles with each such answer (up to <see cref="MaxThrottleDelay"/>)
-    /// and shrinks again with successful loads. A Retry-After header pauses the whole host. On by default.
+    /// and shrinks again with successful loads. A Retry-After header pauses the whole host.
+    /// <para>
+    /// Off by default. It is for scraping from one address, where such answers mean the site is loaded too hard. With rotating
+    /// proxies a block is about the proxy (the proxy list rests it), and with remote loaders the workers set the pace: slowing
+    /// the whole host down there only slows the scraping. Without it a 429 / 503 is retried after the retry delay, or as long
+    /// as its Retry-After asks (up to <see cref="MaxRetryDelay"/>).
+    /// </para>
     /// </summary>
-    public bool AutoThrottle { get; set; } = true;
+    public bool AutoThrottle { get; set; }
 
     /// <summary>Longest delay between loads of a throttled host (and the longest robots.txt Crawl-delay honoured).</summary>
     public TimeSpan MaxThrottleDelay { get; set; } = TimeSpan.FromMinutes(1);
@@ -111,6 +129,7 @@ public sealed class ScraperOptions
     internal void Validate()
     {
         if (MaxConcurrency < 1) throw new ArgumentOutOfRangeException(nameof(MaxConcurrency), MaxConcurrency, "Must be 1 or more");
+        if (MaxLoadedNotHandled < 1) throw new ArgumentOutOfRangeException(nameof(MaxLoadedNotHandled), MaxLoadedNotHandled, "Must be 1 or more");
         if (MaxRetries < 0) throw new ArgumentOutOfRangeException(nameof(MaxRetries), MaxRetries, "Must be 0 or more");
         if (NotFoundRetries < 0) throw new ArgumentOutOfRangeException(nameof(NotFoundRetries), NotFoundRetries, "Must be 0 or more");
         if (ItemBufferSize < 1) throw new ArgumentOutOfRangeException(nameof(ItemBufferSize), ItemBufferSize, "Must be 1 or more");

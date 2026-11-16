@@ -70,6 +70,25 @@ public sealed class UserAgentList
         return new UserAgentList(source, lines, logger);
     }
 
+    /// <summary>
+    /// User agents read by a delegate (an API that needs a POST, a database...). The delegate is called again every
+    /// <paramref name="refreshInterval"/> (5 minutes by default) in the background; when it throws, the old list stays.
+    /// </summary>
+    /// <param name="read">Returns the user agents.</param>
+    /// <param name="name">Name of the source for the log, without secrets.</param>
+    /// <param name="refreshInterval">How often the list is read again.</param>
+    /// <param name="logger">Logger for refresh failures.</param>
+    /// <param name="cancellationToken">Cancels the first read.</param>
+    /// <exception cref="ArgumentException">The first read has no user agent.</exception>
+    public static async Task<UserAgentList> FromSourceAsync(Func<CancellationToken, Task<IEnumerable<string>>> read, string name,
+        TimeSpan? refreshInterval = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        var (source, lines) = await LineSource.OpenAsync(async token => [.. await read(token).ConfigureAwait(false)], name, refreshInterval, What,
+            logger ?? NullLogger.Instance, cancellationToken).ConfigureAwait(false);
+        return new UserAgentList(source, lines, logger);
+    }
+
     /// <summary>How often the file is checked for changes.</summary>
     public TimeSpan FileCheckInterval { get; init; } = TimeSpan.FromSeconds(5);
 

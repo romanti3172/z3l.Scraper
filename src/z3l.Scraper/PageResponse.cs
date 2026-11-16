@@ -32,6 +32,7 @@ public sealed partial class PageResponse
         StatusCode = statusCode;
         Url = url;
         _text = text;
+        MadeFromText = true;
         ContentType = contentType;
         Headers = headers ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
@@ -59,6 +60,9 @@ public sealed partial class PageResponse
         var bytes = Encoding.UTF8.GetBytes(_text!);
         return Interlocked.CompareExchange(ref _body, bytes, null) ?? bytes;
     }
+
+    /// <summary>Made by <see cref="FromText"/>: the text is the page, and <see cref="Body"/> is its UTF-8 bytes whatever Content-Type says.</summary>
+    internal bool MadeFromText { get; }
 
     /// <summary>The body is not empty (without making the bytes of a text response).</summary>
     internal bool HasBody => Volatile.Read(ref _body) is { } body ? body.Length > 0 : _text!.Length > 0;

@@ -27,7 +27,8 @@ internal sealed class RobotsCache(IPageLoader loader, ScraperOptions options, IL
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(runToken);
-            if (options.RequestTimeout != Timeout.InfiniteTimeSpan) timeout.CancelAfter(options.RequestTimeout);
+            // a queue loader waits for its queue and finds lost loads itself
+            if (options.RequestTimeout != Timeout.InfiniteTimeSpan && loader is not IQueuePageLoader) timeout.CancelAfter(options.RequestTimeout);
 
             var response = await loader.LoadAsync(new ScrapeRequest(url, Label), timeout.Token).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)

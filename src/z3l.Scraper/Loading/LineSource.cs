@@ -13,8 +13,8 @@ internal sealed class LineSource
     private static readonly Lazy<HttpClient> SharedClient = new(() => new HttpClient { Timeout = TimeSpan.FromSeconds(30) });
 
     private readonly string? _path;
-    private readonly Uri? _url;
-    private readonly HttpClient? _client;
+    private readonly Func<CancellationToken, Task<List<string>>>? _read;
+    private readonly string? _sourceName;
     private readonly TimeSpan _urlInterval;
     private readonly string _what;
     private readonly ILogger _logger;
@@ -22,18 +22,18 @@ internal sealed class LineSource
     private DateTimeOffset _nextCheck;
     private Task<List<string>?>? _fetch;
 
-    private LineSource(string? path, Uri? url, HttpClient? client, TimeSpan urlInterval, string what, ILogger logger)
+    private LineSource(string? path, Func<CancellationToken, Task<List<string>>>? read, string? sourceName, TimeSpan urlInterval, string what, ILogger logger)
     {
         _path = path;
-        _url = url;
-        _client = client;
+        _read = read;
+        _sourceName = sourceName;
         _urlInterval = urlInterval;
         _what = what;
         _logger = logger;
     }
 
-    /// <summary>The file path, or the URL without its login and query (an API key may be there).</summary>
-    public string Name => _path ?? $"{_url!.Scheme}://{_url.Authority}{_url.AbsolutePath}";
+    /// <summary>The file path, the URL without its login and query (an API key may be there), or the name of a source.</summary>
+    public string Name => _path ?? _sourceName!;
 
     /// <summary>Opens a file and reads its lines.</summary>
     /// <exception cref="FileNotFoundException">No such file.</exception>
@@ -56,11 +56,21 @@ internal sealed class LineSource
         {
             throw new ArgumentException($"Not an http(s) URL: \"{url}\"", nameof(url));
         }
+        var name = $"{url.Scheme}://{url.Authority}{url.AbsolutePath}";
+        return await OpenAsync(token => ReadUrlAsync(url, client, token), name, refreshInterval, what, logger, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads the lines with a delegate (an API that needs a POST, a database...), again every refresh interval.</summary>
+    public static async Task<(LineSource Source, List<string> Lines)> OpenAsync(Func<CancellationToken, Task<List<string>>> read, string name,
+        TimeSpan? refreshInterval, string what, ILogger logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
         var interval = refreshInterval ?? TimeSpan.FromMinutes(5);
         if (interval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(refreshInterval), "The refresh interval must be positive");
 
-        var source = new LineSource(null, url, client, interval, what, logger);
-        var lines = await source.FetchAsync(cancellationToken).ConfigureAwait(false);
+        var source = new LineSource(null, read, name, interval, what, logger);
+        var lines = await source._read!(cancellationToken).ConfigureAwait(false);
         return (source, lines);
     }
 
@@ -116,7 +126,7 @@ internal sealed class LineSource
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
-            return await FetchAsync(timeout.Token).ConfigureAwait(false);
+            return await _read!(timeout.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -125,10 +135,9 @@ internal sealed class LineSource
         }
     }
 
-    private async Task<List<string>> FetchAsync(CancellationToken cancellationToken)
+    private static async Task<List<string>> ReadUrlAsync(Uri url, HttpClient? client, CancellationToken cancellationToken)
     {
-        var client = _client ?? SharedClient.Value;
-        using var response = await client.GetAsync(_url, cancellationToken).ConfigureAwait(false);
+        using var response = await (client ?? SharedClient.Value).GetAsync(url, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         return ParseText(text);

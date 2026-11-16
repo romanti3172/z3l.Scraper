@@ -14,6 +14,22 @@ public interface IPageLoader
 }
 
 /// <summary>
+/// A loader that hands every load to a queue served by remote workers (RabbitMQ...). The queue can be of any length, so the
+/// scraper sends each request as soon as it is accepted: <see cref="ScraperOptions.MaxConcurrency"/> limits only the handlers
+/// that run at once, and <see cref="ScraperOptions.RequestTimeout"/> does not apply, the loader finds lost loads itself
+/// (a load that waits in the queue is not lost). A lost load throws, and the scraper retries it.
+/// </summary>
+public interface IQueuePageLoader : IPageLoader
+{
+    /// <summary>
+    /// Set by the scraper while more than <see cref="ScraperOptions.MaxLoadedNotHandled"/> loaded pages wait for a handler, and
+    /// reset when they are handled: the loader stops taking results (they wait in the queue, not in memory) and does not count
+    /// that time against a load.
+    /// </summary>
+    bool Paused { get; set; }
+}
+
+/// <summary>
 /// A loader that rotates proxies, user agents or sessions: the scraper tells it which responses were
 /// blocked (status 403/429, captcha or block markers), so it can retire the proxy or session that got them.
 /// </summary>

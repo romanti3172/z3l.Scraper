@@ -158,6 +158,7 @@ public sealed class CrawlingTests
     {
         var loads = new ConcurrentQueue<(string Url, DateTime At)>();
         var options = ScraperTests.FastOptions();
+        options.AutoThrottle = true;
         options.MaxConcurrency = 4;
         options.MaxThrottleDelay = TimeSpan.FromMilliseconds(300);
         var scraper = new Scraper(TwoHosts(loads), options).Route("default", _ => { });
@@ -185,6 +186,7 @@ public sealed class CrawlingTests
     {
         var loads = new ConcurrentQueue<(string Url, DateTime At)>();
         var options = ScraperTests.FastOptions();
+        options.AutoThrottle = true;
         options.MaxConcurrency = 1;
         options.MaxThrottleDelay = TimeSpan.FromSeconds(2);
         var scraper = new Scraper(TwoHosts(loads, retryAfter: "1"), options).Route("default", _ => { });
@@ -198,11 +200,11 @@ public sealed class CrawlingTests
     }
 
     [TestMethod]
-    public async Task AutoThrottleOff_DoesNotSlowDown()
+    public async Task AutoThrottleIsOffByDefault_DoesNotSlowDown()
     {
         var loads = new ConcurrentQueue<(string Url, DateTime At)>();
         var options = ScraperTests.FastOptions();
-        options.AutoThrottle = false;
+        Assert.IsFalse(options.AutoThrottle);
         options.MaxThrottleDelay = TimeSpan.FromSeconds(5);
         var scraper = new Scraper(TwoHosts(loads), options).Route("default", _ => { });
 
@@ -222,6 +224,7 @@ public sealed class CrawlingTests
             return Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html("ok")));
         });
         var options = ScraperTests.FastOptions();
+        options.AutoThrottle = true;
         options.MaxConcurrency = 1;
         options.MaxThrottleDelay = TimeSpan.FromMilliseconds(400);
         var blocked = 0;
