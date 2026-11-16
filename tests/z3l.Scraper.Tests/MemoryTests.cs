@@ -6,7 +6,12 @@ using static z3l.Scraper.Tests.ScraperTests;
 namespace z3l.Scraper.Tests;
 
 /// <summary>A page, its text and its parsed tags must go as soon as the handler is done with them.</summary>
+/// <remarks>
+/// Not in parallel with other tests: the forced full collections stop every thread of the process, and the stress test loads
+/// the CPU, which would push the timing of other tests (request timeouts, throttling) off.
+/// </remarks>
 [TestClass]
+[DoNotParallelize]
 public sealed class MemoryTests
 {
     /// <summary>A new page on every load, so nothing outside the scraper keeps it.</summary>

@@ -24,7 +24,7 @@ public sealed class IntegrationTests
             MaxConcurrency = 4,
             MaxRetries = 3,
             RetryDelay = TimeSpan.FromMilliseconds(50),
-            RequestTimeout = TimeSpan.FromSeconds(1),
+            RequestTimeout = TimeSpan.FromSeconds(3),     // the slow page waits 5 s; others get slack for a busy CI machine
             ProgressInterval = null,
             MaxThrottleDelay = TimeSpan.FromMilliseconds(100),   // the 429 and 503 throttle the shop; keep the pauses short
         };
