@@ -1,0 +1,70 @@
+name: Publish
+
+# Publishes both packages to nuget.org on a version tag (v0.1.0-preview.6) or by hand.
+# No API key is stored: nuget.org trusted publishing (policy "z3l.Scraper", workflow publish.yml)
+# gives this workflow a short-lived key through GitHub's OIDC token.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+
+      - name: Version
+        shell: bash
+        run: |
+          v=$(dotnet msbuild src/z3l.Scraper/z3l.Scraper.csproj -getProperty:Version)
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the version $v in src/Directory.Build.props"
+            exit 1
+          fi
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Install Chromium
+        shell: pwsh
+        run: tests/z3l.Scraper.Playwright.Tests/bin/Release/net10.0/playwright.ps1 install --with-deps chromium
+
+      - name: Test
+        run: dotnet test -c Release --no-build
+
+      - name: Pack
+        run: dotnet pack -c Release --no-build -o artifacts
+
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: romanti3172
+
+      # z3l.Scraper first: z3l.Scraper.Playwright depends on it; the .snupkg files go along
+      - name: Push
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          for id in z3l.Scraper z3l.Scraper.Playwright; do
+            dotnet nuget push "artifacts/$id.$VERSION.nupkg" --api-key "$NUGET_API_KEY" \
+              --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: artifacts/*
