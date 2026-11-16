@@ -225,8 +225,16 @@ https://proxy.example:443
 http, https, socks4, socks4a and socks5 proxies, with or without a login, are handled by .NET itself; every proxy has
 its own connections and cookies. Proxies are given out in turn. When a site blocks an answer, the proxy that loaded it
 rests for that site only, as `ProxyBlockPolicy` says: `Ignore`, `Block10Minutes`, `Block1Hour` (the default),
-`Block1Day` or `Remove`. After `MaxConsecutiveFailures` (3) failures in a row (no connection, 407) a proxy rests for every
-site for `DeadProxyPause` (10 min). When every proxy rests for a site, its loads wait for the first one to come back,
+`Block1Day` or `Remove`.
+
+A failure (no connection, a timeout, 407) or a bad response (the proxy answered, but not with the page: its own page, a
+cut-off one, the page fails `MustContain`, the format or another check, comes with a 5xx, or the handler throws
+`RetryRequestException`) puts the proxy after the clean ones: it is taken only when no clean proxy is free. Successes do
+not put a proxy ahead, so the turn stays even and no proxy gets more loads at once than the others. After
+`MaxConsecutiveFailures` (3) failures in a row a proxy rests for every site for `DeadProxyPause` (10 min); after
+`MaxConsecutiveBadResponses` (3) bad responses in a row on a site it rests for that site for `BadResponsePause` (10 min).
+An error older than its pause is forgotten, a good page starts the count again. Bad responses are counted per site, so a
+broken site does not take the proxies from the others; 429 and 503 are left to the throttling. When every proxy rests for a site, its loads wait for the first one to come back,
 no longer than `RequestTimeout`. The file is read again when it changes; proxies that stay keep their rests.
 `proxies.Status()` and `proxies.ToString()` show what each proxy did.
 
@@ -384,13 +392,19 @@ public sealed class BrowserLoader : IBlockAwarePageLoader
     {
         // retire the proxy / browser session that got this response
     }
+
+    // optional: the response was not the page (failed the checks, a 5xx, the handler asked for a retry) / it was the page /
+    // the last load of the request ran out of RequestTimeout
+    public void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason) { }
+    public void ReportGoodResponse(ScrapeRequest request, PageResponse response) { }
+    public void ReportTimeout(ScrapeRequest request) { }
 }
 ```
 
 A loader returns any HTTP status as a normal result and throws only when there is no response; the scraper
 retries that. A loader throws `NonRetryableException` when another attempt cannot help. A loader of your own can
 rotate proxies with `ProxyList` too: `AcquireAsync(host)` gives the next proxy that may load from the site, and
-`ReportSuccess`, `ReportFailure` and `ReportBlocked` tell the list how it went.
+`ReportSuccess`, `ReportFailure`, `ReportBlocked`, `ReportBadResponse` and `ReportGoodResponse` tell the list how it went.
 
 [z3l.Scraper.Playwright](src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
 browser context per proxy.

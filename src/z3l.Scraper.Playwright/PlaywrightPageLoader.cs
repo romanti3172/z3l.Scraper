@@ -37,6 +37,8 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
     private readonly SemaphoreSlim _browserLock = new(1, 1);
     private readonly ConcurrentDictionary<ProxyAddress, Lazy<Task<Session>>> _sessions = new();
     private readonly ConditionalWeakTable<PageResponse, Served> _servedBy = [];
+    /// <summary>The proxy of the last load of a request, for <see cref="ReportTimeout"/> (a timed-out load has no response).</summary>
+    private readonly ConditionalWeakTable<ScrapeRequest, ProxyList.Entry> _lastProxy = [];
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private int _browserGeneration;
@@ -80,6 +82,7 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
         try
         {
             var proxy = _options.Proxies is { } proxies ? await proxies.AcquireAsync(uri.Host, cancellationToken).ConfigureAwait(false) : null;
+            if (proxy != null) _lastProxy.AddOrUpdate(request, proxy);
             Session? session = null;
             PageResponse response;
             try
@@ -124,6 +127,32 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
             proxies.ReportBlocked(served.Proxy, uri.Host);
         }
         if (_options.ResetSessionOnBlock) Retire(served.Session, reason);
+    }
+
+    /// <summary>The response was not the page: after bad responses in a row the proxy that loaded it rests for the site.</summary>
+    public void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason)
+    {
+        if (_servedBy.TryGetValue(response, out var served) && served.Proxy != null && _options.Proxies is { } proxies
+            && Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
+        {
+            proxies.ReportBadResponse(served.Proxy, uri.Host, reason);
+        }
+    }
+
+    /// <summary>The last load of the request timed out: a failure of its proxy.</summary>
+    public void ReportTimeout(ScrapeRequest request)
+    {
+        if (_options.Proxies is { } proxies && _lastProxy.TryGetValue(request, out var proxy)) proxies.ReportFailure(proxy, "timeout");
+    }
+
+    /// <summary>The response was the page: the bad responses in a row of its proxy for the site start again.</summary>
+    public void ReportGoodResponse(ScrapeRequest request, PageResponse response)
+    {
+        if (_servedBy.TryGetValue(response, out var served) && served.Proxy != null && _options.Proxies is { } proxies
+            && Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
+        {
+            proxies.ReportGoodResponse(served.Proxy, uri.Host);
+        }
     }
 
     // ---------------------------------------------------------------- loading

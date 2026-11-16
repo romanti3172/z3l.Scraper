@@ -180,6 +180,69 @@ public sealed class ScraperTests
     }
 
     [TestMethod]
+    public async Task BadResponses_AreReportedToLoader_OverloadAndBlocksAreNot()
+    {
+        // a proxy's own page (no marker), a 502, a 503 (overloaded site), a block, then the page
+        var loader = new FakeLoader().Responses("https://s.test/a",
+            (200, Html("proxy login page")), (502, "bad gateway"), (503, "busy"), (403, "denied"), (200, Html("the shop")));
+        var options = FastOptions();
+        options.Rules.Default.MustContain.Add("the shop");
+        options.MaxRetries = 4;
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
+
+        var result = await scraper.RunToListAsync("https://s.test/a");
+
+        Assert.HasCount(1, result.Items);
+        Assert.HasCount(2, loader.Bad);
+        Assert.HasCount(1, loader.Blocked);
+        CollectionAssert.AreEqual(new[] { "https://s.test/a" }, loader.Good.ToArray());
+    }
+
+    [TestMethod]
+    public async Task Timeout_IsReportedToLoader_AStoppedRunIsNot()
+    {
+        var loader = new FakeLoader { Delay = TimeSpan.FromSeconds(30) }.Page("https://s.test/a", Html("x"));
+        var options = FastOptions();
+        options.RequestTimeout = TimeSpan.FromMilliseconds(100);
+        options.MaxRetries = 1;
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
+
+        await scraper.RunToListAsync("https://s.test/a");
+        Assert.HasCount(2, loader.TimedOut);
+
+        var stopped = new FakeLoader { Delay = TimeSpan.FromSeconds(30) }.Page("https://s.test/a", Html("x"));
+        options.RequestTimeout = TimeSpan.FromMinutes(1);
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => new Scraper(stopped, options).Route("default", _ => { }).RunToListAsync(["https://s.test/a"], cancel.Token));
+        Assert.IsEmpty(stopped.TimedOut);
+    }
+
+    [TestMethod]
+    public async Task HandlerRetry_IsABadResponse_HandlerErrorIsNot()
+    {
+        var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
+        var options = FastOptions();
+        options.RetryOnHandlerError = true;
+        var calls = 0;
+        var scraper = new Scraper(loader, options).Route("default", ctx =>
+        {
+            switch (Interlocked.Increment(ref calls))
+            {
+                case 1: throw new RetryRequestException("prices hidden");
+                case 2: throw new InvalidOperationException("a bug of the handler");
+                default: ctx.Emit("ok"); break;
+            }
+        });
+
+        var result = await scraper.RunToListAsync("https://s.test/a");
+
+        Assert.HasCount(1, result.Items);
+        Assert.HasCount(1, loader.Bad);
+        StringAssert.Contains(loader.Bad.Single(), "prices hidden");
+        Assert.HasCount(1, loader.Good);
+    }
+
+    [TestMethod]
     public async Task BlockMarker_OnErrorStatus_IsBlocked_NotPlainRetry()
     {
         // Cloudflare answers 503 with "Just a moment...": the loader must hear about it to change the proxy

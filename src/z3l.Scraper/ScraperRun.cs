@@ -312,6 +312,7 @@ internal sealed class ScraperRun : IAsyncDisposable
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
                     loadError = ex;
+                    if (ex is OperationCanceledException) ReportTimeout(request);
                     verdict = ex is OperationCanceledException
                         ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
                         : ValidationResult.Retry($"load error: {ex.Message}");
@@ -359,6 +360,11 @@ internal sealed class ScraperRun : IAsyncDisposable
                     break;
 
                 default:
+                    // an answer that is not the page (429 / 503 are the site overloaded, the throttle's business)
+                    if (response != null && loadError == null && response.StatusCode is not (429 or 503))
+                    {
+                        ReportBadResponse(request, response, verdict.Reason!);
+                    }
                     RetryOrFail(request, verdict.Reason!, response, loadError);
                     break;
             }
@@ -377,6 +383,7 @@ internal sealed class ScraperRun : IAsyncDisposable
         try
         {
             await handler(context).ConfigureAwait(false);
+            ReportGoodResponse(request, response);
             return (true, context.Complete());
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
@@ -389,6 +396,10 @@ internal sealed class ScraperRun : IAsyncDisposable
                     {
                         ReportBlocked(request, response, retry.Message);
                         if (_options.AutoThrottle) _throttle.OnOverloaded(host, null, $"handler: {retry.Message}");
+                    }
+                    else
+                    {
+                        ReportBadResponse(request, response, $"handler: {retry.Message}");
                     }
                     RetryOrFail(request, $"handler asked to retry: {retry.Message}", response, retry);
                     break;
@@ -446,6 +457,27 @@ internal sealed class ScraperRun : IAsyncDisposable
             try { blockAware.ReportBlocked(request, response, reason); }
             catch (Exception ex) { Logger.LogError(ex, "ReportBlocked threw"); }
         }
+    }
+
+    private void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason)
+    {
+        if (_scraper.Loader is not IBlockAwarePageLoader blockAware) return;
+        try { blockAware.ReportBadResponse(request, response, reason); }
+        catch (Exception ex) { Logger.LogError(ex, "ReportBadResponse threw"); }
+    }
+
+    private void ReportTimeout(ScrapeRequest request)
+    {
+        if (_scraper.Loader is not IBlockAwarePageLoader blockAware) return;
+        try { blockAware.ReportTimeout(request); }
+        catch (Exception ex) { Logger.LogError(ex, "ReportTimeout threw"); }
+    }
+
+    private void ReportGoodResponse(ScrapeRequest request, PageResponse response)
+    {
+        if (_scraper.Loader is not IBlockAwarePageLoader blockAware) return;
+        try { blockAware.ReportGoodResponse(request, response); }
+        catch (Exception ex) { Logger.LogError(ex, "ReportGoodResponse threw"); }
     }
 
     private void RetryOrFail(ScrapeRequest request, string reason, PageResponse? response, Exception? error, FailureReason reasonWhenOut = FailureReason.RetriesExhausted)

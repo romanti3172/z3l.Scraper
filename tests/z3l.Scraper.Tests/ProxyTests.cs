@@ -143,6 +143,82 @@ public sealed class ProxyTests
     }
 
     [TestMethod]
+    public async Task BadResponsesInARow_RestTheProxyForThatSiteOnly_AGoodResponseResetsTheCount()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1"]) { Clock = clock, MaxConsecutiveBadResponses = 3, BadResponsePause = TimeSpan.FromMinutes(10) };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+
+        list.ReportBadResponse(a, Site, "no marker");
+        list.ReportBadResponse(a, Site, "no marker");
+        list.ReportBadResponse(a, "other.test", "no marker");     // another site counts apart
+        list.ReportBadResponse(a, "other.test", "no marker");
+        list.ReportGoodResponse(a, Site);                         // the count for shop.test starts again
+        list.ReportBadResponse(a, Site, "no marker");
+        list.ReportBadResponse(a, Site, "no marker");
+        Assert.AreEqual(0, list.Status().Single(s => s.Address.Host == "a.test").BlockedSites);
+
+        list.ReportBadResponse(a, Site, "no marker");             // third in a row
+        var status = list.Status().Single(s => s.Address.Host == "a.test");
+        Assert.AreEqual(1, status.BlockedSites);
+        Assert.IsFalse(status.Dead);
+        Assert.AreEqual(7, status.BadResponses);
+        Assert.AreEqual("b.test", await Next(list));
+        Assert.AreEqual("b.test", await Next(list));
+        Assert.AreEqual("b.test", await Next(list, "other.test"));          // pessimized there, not resting
+        CollectionAssert.Contains(new[] { await Next(list, "third.test"), await Next(list, "third.test") }, "a.test");
+        StringAssert.Contains(list.ToString(), "7 bad responses");
+
+        clock.Now = clock.Now.AddMinutes(11);
+        CollectionAssert.Contains(new[] { await Next(list), await Next(list) }, "a.test");
+    }
+
+    [TestMethod]
+    public async Task OneError_PutsTheProxyAfterTheCleanOnes_UntilTheErrorIsOld()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1", "c.test:1"]) { Clock = clock, DeadProxyPause = TimeSpan.FromMinutes(10) };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+        list.ReportFailure(a, "refused");
+
+        CollectionAssert.AreEqual(new[] { "b.test", "c.test", "b.test", "c.test" },
+            new[] { await Next(list), await Next(list), await Next(list), await Next(list) });
+        Assert.IsFalse(list.Status().Single(s => s.Address.Host == "a.test").Dead);
+
+        clock.Now = clock.Now.AddMinutes(11);                     // the failure is old: a is clean again
+        CollectionAssert.Contains(new[] { await Next(list), await Next(list), await Next(list) }, "a.test");
+    }
+
+    [TestMethod]
+    public async Task PessimizedProxies_AreTakenWhenNoCleanOneIsFree()
+    {
+        var list = new ProxyList(["a.test:1", "b.test:1"]);
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+        var b = await list.AcquireAsync(Site, CancellationToken.None);
+        list.ReportFailure(a, "refused");
+        list.ReportBadResponse(b, Site, "no marker");
+        list.ReportBlocked(b, "other.test");
+
+        Assert.AreEqual("a.test", await Next(list));              // both pessimized for shop.test: the turn goes on
+        Assert.AreEqual("b.test", await Next(list));
+        Assert.AreEqual("a.test", await Next(list, "other.test")); // b rests there
+    }
+
+    [TestMethod]
+    public async Task BadResponses_DoNotShortenALongerBlock()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1"], ProxyBlockPolicy.Block1Day) { Clock = clock, MaxConsecutiveBadResponses = 1 };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+        list.ReportBlocked(a, Site);
+        list.ReportBadResponse(a, Site, "no marker");
+
+        clock.Now = clock.Now.AddHours(2);
+        Assert.AreEqual("b.test", await Next(list));
+        Assert.AreEqual("b.test", await Next(list));
+    }
+
+    [TestMethod]
     [Timeout(10_000, CooperativeCancellation = true)]
     public async Task EveryProxyResting_TheLoadWaitsForTheFirstToComeBack()
     {
@@ -250,7 +326,7 @@ public sealed class ProxyTests
         public ConcurrentQueue<string> Requests { get; } = new();
         public ConcurrentQueue<string> UserAgents { get; } = new();
 
-        public static async Task<FakeProxy> StartAsync(int status, string body)
+        public static async Task<FakeProxy> StartAsync(int status, string body, TimeSpan delay = default)
         {
             var builder = WebApplication.CreateSlimBuilder();
             builder.Logging.ClearProviders();
@@ -261,6 +337,11 @@ public sealed class ProxyTests
             {
                 proxy.Requests.Enqueue($"{http.Request.Host}{http.Request.Path}");
                 proxy.UserAgents.Enqueue(http.Request.Headers.UserAgent.ToString());
+                if (delay > TimeSpan.Zero)
+                {
+                    try { await Task.Delay(delay, http.RequestAborted); }
+                    catch (OperationCanceledException) { return; }
+                }
                 http.Response.StatusCode = status;
                 http.Response.ContentType = "text/html";
                 await http.Response.WriteAsync(body);
@@ -300,12 +381,55 @@ public sealed class ProxyTests
         Assert.AreEqual(6, StatusOf(proxies, good).Successes);
     }
 
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_ProxyThatAnswersWithItsOwnPage_GoesAfterTheCleanOnesForTheSite()
+    {
+        await using var junk = await FakeProxy.StartAsync(200, "<html><body>Welcome to our free proxy</body></html>");
+        await using var good = await FakeProxy.StartAsync(200, "<html><body>the shop</body></html>");
+        var proxies = new ProxyList([junk.Address, good.Address]);
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
+        var options = ScraperTests.FastOptions();
+        options.MaxConcurrency = 1;
+        options.Rules.Default.MustContain.Add("the shop");
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+
+        var result = await scraper.RunToListAsync(Enumerable.Range(1, 10).Select(i => (ScrapeRequest)$"http://{Site}/p/{i}"));
+
+        Assert.HasCount(10, result.Items);
+        Assert.HasCount(1, junk.Requests);              // one bad response: the clean proxy goes first from then on
+        Assert.HasCount(10, good.Requests);
+        Assert.AreEqual(1, StatusOf(proxies, junk).BadResponses);
+        Assert.IsFalse(StatusOf(proxies, junk).Dead);   // other sites may still use it
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_ProxyThatHangs_ATimeoutIsAFailureOfTheProxy()
+    {
+        await using var hanging = await FakeProxy.StartAsync(200, "<html><body>late</body></html>", TimeSpan.FromSeconds(20));
+        await using var good = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
+        var proxies = new ProxyList([hanging.Address, good.Address]);
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
+        var options = ScraperTests.FastOptions();
+        options.MaxConcurrency = 1;
+        options.RequestTimeout = TimeSpan.FromMilliseconds(300);
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
+
+        var result = await scraper.RunToListAsync(Enumerable.Range(1, 5).Select(i => (ScrapeRequest)$"http://{Site}/p/{i}"));
+
+        Assert.HasCount(5, result.Items);
+        Assert.HasCount(1, hanging.Requests);
+        Assert.AreEqual(1, StatusOf(proxies, hanging).Failures);
+        Assert.AreEqual(5, StatusOf(proxies, good).Successes);
+    }
+
     private static ProxyStatus StatusOf(ProxyList proxies, FakeProxy proxy) =>
         proxies.Status().Single(s => s.Address.Port == new Uri(proxy.Address).Port);
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task Loader_ProxyThatAsksForALogin_RestsAfterFailuresInARow()
+    public async Task Loader_ProxyThatAsksForALogin_GoesAfterTheCleanOnes_RestsWhenItIsTheOnlyOne()
     {
         await using var noLogin = await FakeProxy.StartAsync(407, "Proxy Authentication Required");
         await using var good = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
@@ -319,9 +443,18 @@ public sealed class ProxyTests
         var result = await scraper.RunToListAsync(Enumerable.Range(1, 10).Select(i => (ScrapeRequest)$"http://{Site}/p/{i}"));
 
         Assert.AreEqual(10, result.Stats.Succeeded);
-        Assert.HasCount(3, noLogin.Requests);           // three failures in a row, then it rests
-        Assert.IsTrue(StatusOf(proxies, noLogin).Dead);
-        Assert.AreEqual(3, StatusOf(proxies, noLogin).Failures);
+        Assert.HasCount(1, noLogin.Requests);           // one failure: the clean proxy goes first from then on
+        Assert.IsFalse(StatusOf(proxies, noLogin).Dead);
+
+        // alone, it is taken again (a pessimized proxy is better than none) until three failures in a row rest it
+        var alone = new ProxyList([noLogin.Address]);
+        using var aloneLoader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = alone });
+        options.MaxRetries = 2;
+        var failed = await new Scraper(aloneLoader, options).Route("default", _ => { }).RunToListAsync($"http://{Site}/x");
+
+        Assert.HasCount(1, failed.Failed);
+        Assert.IsTrue(alone.Status().Single().Dead);
+        Assert.AreEqual(3, alone.Status().Single().Failures);
     }
 
     [TestMethod]
