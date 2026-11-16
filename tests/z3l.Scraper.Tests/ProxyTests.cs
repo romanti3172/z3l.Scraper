@@ -248,6 +248,7 @@ public sealed class ProxyTests
 
         public string Address { get; private set; } = "";
         public ConcurrentQueue<string> Requests { get; } = new();
+        public ConcurrentQueue<string> UserAgents { get; } = new();
 
         public static async Task<FakeProxy> StartAsync(int status, string body)
         {
@@ -259,6 +260,7 @@ public sealed class ProxyTests
             app.Run(async http =>
             {
                 proxy.Requests.Enqueue($"{http.Request.Host}{http.Request.Path}");
+                proxy.UserAgents.Enqueue(http.Request.Headers.UserAgent.ToString());
                 http.Response.StatusCode = status;
                 http.Response.ContentType = "text/html";
                 await http.Response.WriteAsync(body);
@@ -331,5 +333,181 @@ public sealed class ProxyTests
             Proxies = new ProxyList(["127.0.0.1:2"]),
         }));
         Assert.ThrowsExactly<ArgumentException>(() => new HttpPageLoader(new HttpClient(), new HttpPageLoaderOptions { Proxies = new ProxyList(["127.0.0.1:2"]) }));
+    }
+
+    // ------------------------------------------------------------------ user agents
+
+    [TestMethod]
+    public void UserAgents_GoInTurn_CommentsAndDuplicatesSkipped()
+    {
+        var list = new UserAgentList(["# browsers", "UA-1", "  UA-2  ", "", "UA-1"]);
+
+        Assert.AreEqual(2, list.Count);
+        CollectionAssert.AreEqual(new[] { "UA-1", "UA-2", "UA-1" }, new[] { list.Next(), list.Next(), list.Next() });
+        Assert.ThrowsExactly<ArgumentException>(() => new UserAgentList(["# nothing", " "]));
+    }
+
+    [TestMethod]
+    public async Task UserAgents_FileIsReadAgainWhenItChanges_AnEmptyFileKeepsTheOldList()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"z3l-agents-{Guid.NewGuid():N}.txt");
+        try
+        {
+            await File.WriteAllLinesAsync(path, ["UA-1"]);
+            var clock = new ManualClock();
+            var list = UserAgentList.FromFile(path);
+            list.Clock = clock;
+            Assert.AreEqual("UA-1", list.Next());
+
+            await File.WriteAllLinesAsync(path, ["UA-2", "UA-3"]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+            Assert.AreEqual("UA-1", list.Next());              // not checked yet
+            clock.Now = clock.Now.AddSeconds(10);
+            Assert.AreEqual("UA-2", list.Next());
+            Assert.AreEqual(2, list.Count);
+
+            await File.WriteAllLinesAsync(path, ["# all gone"]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(2));
+            clock.Now = clock.Now.AddSeconds(10);
+            Assert.AreEqual("UA-3", list.Next());
+            Assert.AreEqual(2, list.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("a\nb\r\n\n# c", new[] { "a", "b", "", "# c" })]
+    [DataRow("  [\"a\", 1, \"b\"]", new[] { "a", "b" })]
+    [DataRow("[not json", new[] { "[not json" })]
+    public void ListText_IsLinesOrAJsonArray(string text, string[] lines)
+    {
+        CollectionAssert.AreEqual(lines, LineSource.ParseText(text));
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_EveryProxyKeepsOneUserAgent()
+    {
+        await using var first = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
+        await using var second = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions
+        {
+            Proxies = new ProxyList([first.Address, second.Address]),
+            UserAgents = new UserAgentList(["UA-1", "UA-2", "UA-3"]),
+        });
+
+        for (var i = 0; i < 6; i++) await loader.LoadAsync($"http://{Site}/p/{i}", CancellationToken.None);
+
+        Assert.HasCount(3, first.UserAgents);
+        Assert.HasCount(3, second.UserAgents);
+        Assert.HasCount(1, first.UserAgents.Distinct());
+        Assert.HasCount(1, second.UserAgents.Distinct());
+        Assert.AreNotEqual(first.UserAgents.First(), second.UserAgents.First());
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_WithoutProxies_RotatesUserAgents_TheRequestHeaderWins()
+    {
+        await using var site = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { UserAgents = new UserAgentList(["UA-1", "UA-2"]) });
+
+        await loader.LoadAsync(site.Address + "/1", CancellationToken.None);
+        await loader.LoadAsync(site.Address + "/2", CancellationToken.None);
+        await loader.LoadAsync(new ScrapeRequest(site.Address + "/3") { Headers = new Dictionary<string, string> { ["User-Agent"] = "Mine" } }, CancellationToken.None);
+
+        CollectionAssert.AreEqual(new[] { "UA-1", "UA-2", "Mine" }, site.UserAgents.ToArray());
+    }
+
+    // ------------------------------------------------------------------ lists from a URL
+
+    /// <summary>Serves a list; the answer can be changed while it runs.</summary>
+    private sealed class ListServer : IAsyncDisposable
+    {
+        private readonly WebApplication _app;
+        private ListServer(WebApplication app) => _app = app;
+
+        public volatile string Text = "";
+        public volatile int Status = 200;
+        public int Hits;
+        public Uri Url { get; private set; } = null!;
+
+        public static async Task<ListServer> StartAsync(string text)
+        {
+            var builder = WebApplication.CreateSlimBuilder();
+            builder.Logging.ClearProviders();
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            var app = builder.Build();
+            var server = new ListServer(app) { Text = text };
+            app.Run(async http =>
+            {
+                Interlocked.Increment(ref server.Hits);
+                http.Response.StatusCode = server.Status;
+                await http.Response.WriteAsync(server.Text);
+            });
+            await app.StartAsync();
+            server.Url = new Uri(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First() + "/list?key=secret");
+            return server;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _app.StopAsync();
+            await _app.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Url_IsReadAgainEveryInterval_ProxiesKeepTheirRests_AFailureKeepsTheOldList()
+    {
+        await using var server = await ListServer.StartAsync("a.test:1\nb.test:1");
+        var clock = new ManualClock();
+        var list = await ProxyList.FromUrlAsync(server.Url, refreshInterval: TimeSpan.FromMinutes(5));
+        list.Clock = clock;
+        Assert.AreEqual(2, list.Count);
+        list.ReportBlocked(await list.AcquireAsync(Site, CancellationToken.None), Site);    // a rests for shop.test
+
+        server.Text = """["a.test:1", "c.test:1"]""";
+        Assert.AreEqual("b.test", await Next(list));          // the interval has not passed
+        Assert.AreEqual(1, Volatile.Read(ref server.Hits));
+
+        clock.Now = clock.Now.AddMinutes(6);
+        while (await Next(list) != "c.test") await Task.Delay(20);     // the refresh runs in the background
+        Assert.AreEqual(2, list.Count);
+        Assert.AreEqual("c.test", await Next(list));          // a still rests: its state came over
+
+        server.Status = 500;
+        clock.Now = clock.Now.AddMinutes(6);
+        var hits = Volatile.Read(ref server.Hits);
+        while (Volatile.Read(ref server.Hits) == hits)
+        {
+            await Next(list);
+            await Task.Delay(20);
+        }
+        await Task.Delay(100);
+        await Next(list);
+        Assert.AreEqual(2, list.Count);
+        Assert.AreEqual("c.test", await Next(list));
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Url_FirstReadFails_Throws()
+    {
+        await using var server = await ListServer.StartAsync("UA-1");
+        server.Status = 503;
+        await Assert.ThrowsAsync<HttpRequestException>(() => UserAgentList.FromUrlAsync(server.Url));
+
+        server.Status = 200;
+        server.Text = "# empty";
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => ProxyList.FromUrlAsync(server.Url));
+
+        server.Text = "UA-1\nUA-2";
+        var agents = await UserAgentList.FromUrlAsync(server.Url);
+        Assert.AreEqual(2, agents.Count);
     }
 }

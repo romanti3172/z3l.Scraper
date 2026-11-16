@@ -230,6 +230,28 @@ site for `DeadProxyPause` (10 min). When every proxy rests for a site, its loads
 no longer than `RequestTimeout`. The file is read again when it changes; proxies that stay keep their rests.
 `proxies.Status()` and `proxies.ToString()` show what each proxy did.
 
+The list can also come from a proxy service: the URL answers with the same lines or with a JSON array of them, and is read
+again every 5 minutes in the background (a failed read keeps the old list):
+
+```csharp
+var api = new HttpClient { DefaultRequestHeaders = { { "X-Api-Key", key } } };
+var proxies = await ProxyList.FromUrlAsync(new Uri("https://proxies.example/list"), refreshInterval: TimeSpan.FromMinutes(5), httpClient: api);
+```
+
+### User agents
+
+```csharp
+using var loader = new HttpPageLoader(new HttpPageLoaderOptions
+{
+    Proxies = ProxyList.FromFile("proxies.txt"),
+    UserAgents = UserAgentList.FromFile("useragents.txt"),     // or await UserAgentList.FromUrlAsync(url)
+});
+```
+
+One user agent per line, `#` for comments; the file is read again when it changes. With proxies every proxy takes one
+user agent and keeps it, as it keeps its cookies, so a site sees one browser per address; without proxies every request
+takes the next one. A `User-Agent` in `DefaultHeaders` or in the request still wins.
+
 ## Throttling
 
 A host that answers 429 or 503, or whose responses are blocked (also when a handler throws
@@ -338,7 +360,7 @@ items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; 
 using var loader = new HttpPageLoader(new HttpPageLoaderOptions
 {
     Proxies = ProxyList.FromFile("proxies.txt"),           // or Proxy = new WebProxy(...) for one; none: the system settings
-    UserAgent = "...",
+    UserAgent = "...",                                     // or UserAgents = UserAgentList.FromFile("useragents.txt")
     DefaultHeaders = { ["Accept-Language"] = "de-DE" },
     MaxResponseBytes = 10 * 1024 * 1024,                   // bigger responses fail without retries
 });

@@ -110,6 +110,7 @@ public sealed record ProxyStatus(ProxyAddress Address, long Loads, long Successe
 /// <example>
 /// <code>
 /// var proxies = ProxyList.FromFile("proxies.txt");                      // re-read when the file changes
+/// // or: await ProxyList.FromUrlAsync(new Uri("https://proxies.example/list.txt"));   // re-read every 5 minutes
 /// using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
 /// </code>
 /// </example>
@@ -117,11 +118,9 @@ public sealed class ProxyList
 {
     private readonly object _lock = new();
     private readonly ILogger _logger;
-    private readonly string? _path;
+    private readonly LineSource? _source;
     private List<Entry> _entries;
     private int _cursor;
-    private DateTime _fileWriteTime;
-    private DateTimeOffset _nextFileCheck;
     private readonly HashSet<string> _waitLogged = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>A list of proxy lines (see <see cref="ProxyAddress.TryParse"/>); bad lines are skipped.</summary>
@@ -131,14 +130,14 @@ public sealed class ProxyList
     {
     }
 
-    private ProxyList(string? path, IEnumerable<string> lines, ProxyBlockPolicy blockPolicy, ILogger? logger)
+    private ProxyList(LineSource? source, IEnumerable<string> lines, ProxyBlockPolicy blockPolicy, ILogger? logger)
     {
         ArgumentNullException.ThrowIfNull(lines);
-        _path = path;
+        _source = source;
         _logger = logger ?? NullLogger.Instance;
         BlockPolicy = blockPolicy;
         _entries = Parse(lines, previous: null);
-        if (_entries.Count == 0) throw new ArgumentException(path == null ? "No proxies in the list" : $"No proxies in {path}", nameof(lines));
+        if (_entries.Count == 0) throw new ArgumentException(source == null ? "No proxies in the list" : $"No proxies in {source.Name}", nameof(lines));
     }
 
     /// <summary>
@@ -149,12 +148,31 @@ public sealed class ProxyList
     /// <exception cref="ArgumentException">No line of the file is a proxy.</exception>
     public static ProxyList FromFile(string path, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, ILogger? logger = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        var full = Path.GetFullPath(path);
-        var list = new ProxyList(full, ReadLines(full), blockPolicy, logger);
-        list._fileWriteTime = File.GetLastWriteTimeUtc(full);
-        return list;
+        var (source, lines) = LineSource.OpenFile(path, What, logger ?? NullLogger.Instance);
+        return new ProxyList(source, lines, blockPolicy, logger);
     }
+
+    /// <summary>
+    /// Proxies from a URL that answers with text, one proxy per line, or a JSON array of proxy strings. The URL is read again every
+    /// <paramref name="refreshInterval"/> (5 minutes by default) in the background; when it fails, the old list stays. Proxies that
+    /// stay in the list keep their state.
+    /// </summary>
+    /// <param name="url">http(s) URL of the list.</param>
+    /// <param name="blockPolicy">What happens to a proxy a site blocks.</param>
+    /// <param name="refreshInterval">How often the list is read again.</param>
+    /// <param name="httpClient">Client for the requests (for example with an API key header); a shared one when null.</param>
+    /// <param name="logger">Logger for blocks, rests and refresh failures.</param>
+    /// <param name="cancellationToken">Cancels the first read.</param>
+    /// <exception cref="HttpRequestException">The first read failed.</exception>
+    /// <exception cref="ArgumentException">No line of the answer is a proxy.</exception>
+    public static async Task<ProxyList> FromUrlAsync(Uri url, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, TimeSpan? refreshInterval = null,
+        HttpClient? httpClient = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+    {
+        var (source, lines) = await LineSource.OpenUrlAsync(url, refreshInterval, httpClient, What, logger ?? NullLogger.Instance, cancellationToken).ConfigureAwait(false);
+        return new ProxyList(source, lines, blockPolicy, logger);
+    }
+
+    private const string What = "Proxy list";
 
     /// <summary>What happens to a proxy a site blocks.</summary>
     public ProxyBlockPolicy BlockPolicy { get; }
@@ -275,47 +293,20 @@ public sealed class ProxyList
         _logger.LogInformation("Proxy {Proxy} is blocked on {Site}: {Policy}", entry.Address, site, BlockPolicy);
     }
 
-    // ---------------------------------------------------------------- file
+    // ---------------------------------------------------------------- file or URL
 
     private void ReloadIfChanged()
     {
-        if (_path == null) return;
-        var now = Clock.GetUtcNow();
-        if (now < _nextFileCheck) return;
-        _nextFileCheck = now + FileCheckInterval;
-
-        try
+        if (_source?.Poll(Clock.GetUtcNow(), FileCheckInterval) is not { } lines) return;
+        var entries = Parse(lines, _entries);
+        if (entries.Count == 0)
         {
-            var written = File.GetLastWriteTimeUtc(_path);
-            if (written == _fileWriteTime) return;
-            var entries = Parse(ReadLines(_path), _entries);
-            if (entries.Count == 0)
-            {
-                _logger.LogWarning("{Path} has no proxies now: the old list stays", _path);
-                return;
-            }
-            _fileWriteTime = written;
-            _entries = entries;
-            _cursor = 0;
-            _logger.LogInformation("Proxy list {Path} read again: {Count} proxies", _path, entries.Count);
+            _logger.LogWarning("{Source} has no proxies now: the old list stays", _source.Name);
+            return;
         }
-        catch (IOException ex)
-        {
-            _logger.LogWarning("Proxy list {Path} could not be read again ({Message}): the old list stays", _path, ex.Message);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            _logger.LogWarning("Proxy list {Path} could not be read again ({Message}): the old list stays", _path, ex.Message);
-        }
-    }
-
-    private static IEnumerable<string> ReadLines(string path)
-    {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        using var reader = new StreamReader(stream);
-        var lines = new List<string>();
-        while (reader.ReadLine() is { } line) lines.Add(line);
-        return lines;
+        _entries = entries;
+        _cursor = 0;
+        _logger.LogInformation("Proxy list {Source} read again: {Count} proxies", _source.Name, entries.Count);
     }
 
     /// <summary>Proxies of the lines; a proxy that was in the old list keeps its entry (its rests and counters).</summary>

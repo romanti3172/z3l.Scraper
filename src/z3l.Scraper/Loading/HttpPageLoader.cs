@@ -9,9 +9,16 @@ namespace z3l.Scraper.Loading;
 /// <summary>Settings of <see cref="HttpPageLoader"/>.</summary>
 public sealed class HttpPageLoaderOptions
 {
-    /// <summary>User-Agent header sent with every request unless the request sets its own.</summary>
+    /// <summary>User-Agent header sent with every request unless the request sets its own; not used when <see cref="UserAgents"/> is set.</summary>
     public string UserAgent { get; set; } =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+
+    /// <summary>
+    /// User agents to rotate instead of <see cref="UserAgent"/>. With <see cref="Proxies"/> every proxy takes one user agent and keeps
+    /// it while the loader lives (as it keeps its cookies), so a site sees one browser per address; without proxies every request takes
+    /// the next one. A User-Agent in <see cref="DefaultHeaders"/> or in the request still wins.
+    /// </summary>
+    public UserAgentList? UserAgents { get; set; }
 
     /// <summary>Headers sent with every request.</summary>
     public Dictionary<string, string> DefaultHeaders { get; } = new(StringComparer.OrdinalIgnoreCase)
@@ -44,6 +51,7 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
     private readonly bool _ownsClient;
     private readonly HttpPageLoaderOptions _options;
     private readonly ConcurrentDictionary<string, Lazy<HttpClient>> _proxyClients = new();
+    private readonly ConcurrentDictionary<string, string> _proxyUserAgents = new();
 
     /// <summary>Which proxy loaded a response, so a block reported for it rests the right proxy.</summary>
     private readonly ConditionalWeakTable<PageResponse, ProxyList.Entry> _servedBy = [];
@@ -82,9 +90,16 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
 
         using var message = CreateMessage(request, uri);
 
-        if (_options.Proxies is not { } proxies) return await SendAsync(_client!, message, request, cancellationToken).ConfigureAwait(false);
+        if (_options.Proxies is not { } proxies)
+        {
+            SetUserAgent(message, _options.UserAgents?.Next() ?? _options.UserAgent);
+            return await SendAsync(_client!, message, request, cancellationToken).ConfigureAwait(false);
+        }
 
         var proxy = await proxies.AcquireAsync(uri.Host, cancellationToken).ConfigureAwait(false);
+        SetUserAgent(message, _options.UserAgents is { } agents
+            ? _proxyUserAgents.GetOrAdd(proxy.Address.Key, static (_, list) => list.Next(), agents)
+            : _options.UserAgent);
         var client = _proxyClients.GetOrAdd(proxy.Address.Key, _ => new Lazy<HttpClient>(() => CreateClient(proxy.Address.ToWebProxy()))).Value;
         PageResponse response;
         try
@@ -144,7 +159,6 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
             message.Content.Headers.ContentType = mediaType;
         }
 
-        message.Headers.TryAddWithoutValidation("User-Agent", _options.UserAgent);
         foreach (var header in _options.DefaultHeaders) SetHeader(message, header.Key, header.Value);
         if (request.Headers != null)
         {
@@ -215,6 +229,12 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
     private const int FirstBufferSize = 64 * 1024;
     private const int MaxBodyLength = 0x7FFFFFC7;    // Array.MaxLength
 
+    /// <summary>The loader's user agent, unless the default headers or the request set one.</summary>
+    private static void SetUserAgent(HttpRequestMessage message, string userAgent)
+    {
+        if (!message.Headers.Contains("User-Agent")) message.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+    }
+
     private static void SetHeader(HttpRequestMessage message, string name, string value)
     {
         if (message.Content != null && name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase))
@@ -236,5 +256,6 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
             if (client.IsValueCreated) client.Value.Dispose();
         }
         _proxyClients.Clear();
+        _proxyUserAgents.Clear();
     }
 }
