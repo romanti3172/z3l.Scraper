@@ -43,6 +43,10 @@ more**, the Licensee must purchase a Commercial License.
 The Commercial License grants the same rights as section 2, without the revenue and headcount
 limits.
 
+**One license for all z3l libraries.** The Commercial License is not limited to the Software: it
+also covers z3l.FastHtmlParser and every other library and package published by z3l, now or in
+the future, on the same terms. The Licensee pays USD 1,000 once and needs no other z3l license.
+
 ## 4. Conditions (both licenses)
 
 1. This license text and the copyright notice must be kept in all copies or substantial portions
@@ -76,10 +80,9 @@ THE COPYRIGHT HOLDERS SHALL NOT EXCEED THE AMOUNT PAID BY THE LICENSEE FOR THE S
 
 ## 8. Other Components
 
-The Software uses z3l.FastHtmlParser, which is licensed separately under its own license
-(https://www.nuget.org/packages/z3l.FastHtmlParser). Its free and commercial terms follow the
-same thresholds: a Licensee that needs a Commercial License of the Software needs one of
-z3l.FastHtmlParser as well.
+The Software uses z3l.FastHtmlParser, which is published under its own license with the same
+thresholds (https://www.nuget.org/packages/z3l.FastHtmlParser). A Small Licensee uses it free; a
+Commercial License of the Software already covers it (section 3), so no separate payment is due.
 
 The z3l.Scraper.Playwright package depends on Microsoft.Playwright, which is licensed separately
 under the Apache License 2.0 (https://github.com/microsoft/playwright-dotnet). The browsers that
