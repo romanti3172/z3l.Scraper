@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
@@ -171,24 +172,48 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
         return new PageResponse((int)response.StatusCode, finalUrl, body, response.Content.Headers.ContentType?.ToString(), headers);
     }
 
+    /// <summary>
+    /// Reads the body into pooled buffers and copies it once into an array of its size. Growing arrays of its own would
+    /// cost about three times the page for every page, mostly on the large object heap (arrays over 85 KB), which only
+    /// full collections clean.
+    /// </summary>
     private async Task<byte[]> ReadBodyAsync(HttpContent content, CancellationToken cancellationToken)
     {
-        if (_options.MaxResponseBytes <= 0) return await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-
+        var limit = _options.MaxResponseBytes > 0 ? _options.MaxResponseBytes : long.MaxValue;
         await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[81920];
-        int read;
-        while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
+
+        // the length is unknown for compressed and chunked answers; with a known one a single buffer is enough
+        var length = content.Headers.ContentLength;
+        var buffer = ArrayPool<byte>.Shared.Rent(length is > 0 and < MaxBodyLength ? (int)length.Value + 1 : FirstBufferSize);
+        var total = 0;
+        try
         {
-            buffer.Write(chunk, 0, read);
-            if (buffer.Length > _options.MaxResponseBytes)
+            while (true)
             {
-                throw new NonRetryableException($"Response is more than MaxResponseBytes {_options.MaxResponseBytes}");
+                if (total == buffer.Length)
+                {
+                    if (buffer.Length >= MaxBodyLength) throw new NonRetryableException($"Response is more than {MaxBodyLength} bytes");
+                    var bigger = ArrayPool<byte>.Shared.Rent((int)Math.Min(2L * buffer.Length, MaxBodyLength));
+                    buffer.AsSpan(0, total).CopyTo(bigger);
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = bigger;
+                }
+
+                var read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                total += read;
+                if (total > limit) throw new NonRetryableException($"Response is more than MaxResponseBytes {_options.MaxResponseBytes}");
             }
+            return total == 0 ? [] : buffer.AsSpan(0, total).ToArray();
         }
-        return buffer.ToArray();
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
+
+    private const int FirstBufferSize = 64 * 1024;
+    private const int MaxBodyLength = 0x7FFFFFC7;    // Array.MaxLength
 
     private static void SetHeader(HttpRequestMessage message, string name, string value)
     {

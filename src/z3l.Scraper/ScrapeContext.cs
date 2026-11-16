@@ -9,12 +9,13 @@ namespace z3l.Scraper;
 
 /// <summary>
 /// What a handler gets: the request, the loaded page, and ways to queue more pages and emit items.
-/// Valid only while the handler runs.
+/// Valid only while the handler runs: then the page is let go, so a context kept by mistake does not keep it in memory.
 /// </summary>
 public sealed class ScrapeContext
 {
     private readonly ScraperRun _run;
     private readonly object _lock = new();
+    private PageResponse? _response;
     private HtmlParser? _html;
     private Sitemap? _sitemap;
     private List<object>? _items;
@@ -24,7 +25,7 @@ public sealed class ScrapeContext
     {
         _run = run;
         Request = request;
-        Response = response;
+        _response = response;
         CancellationToken = cancellationToken;
     }
 
@@ -32,7 +33,8 @@ public sealed class ScrapeContext
     public ScrapeRequest Request { get; }
 
     /// <summary>The loaded page.</summary>
-    public PageResponse Response { get; }
+    /// <exception cref="InvalidOperationException">The handler has finished.</exception>
+    public PageResponse Response => Volatile.Read(ref _response) ?? throw Finished();
 
     /// <summary>Cancelled when the run stops.</summary>
     public CancellationToken CancellationToken { get; }
@@ -42,16 +44,36 @@ public sealed class ScrapeContext
 
     /// <summary>
     /// The page parsed with z3l.FastHtmlParser, made on first use; relative links resolve against the final page URL.
+    /// The parser is disposed when the handler ends and its tags stop working: take the values you need
+    /// (<c>Text()</c>, <c>AttributeHref()</c>, <c>XPathValue()</c>...), not the tags.
     /// </summary>
-    public HtmlParser Html => _html ??= new HtmlParser(Response.Text, Response.Url);
+    /// <exception cref="InvalidOperationException">The handler has finished.</exception>
+    public HtmlParser Html => Volatile.Read(ref _html) ?? CreateParser();
+
+    private HtmlParser CreateParser()
+    {
+        var response = Response;
+        var parser = HtmlParser.Parse(response.TextMemory, response.Url);      // reads the text in place; disposed before the text is released
+        lock (_lock)
+        {
+            if (_completed || _html != null)
+            {
+                parser.Dispose();
+                if (_completed) throw Finished();
+                return _html!;      // another thread of the handler made it first
+            }
+            _html = parser;
+            return parser;
+        }
+    }
 
     /// <summary>The body deserialized from JSON (web defaults: property names ignore case).</summary>
     [RequiresUnreferencedCode("Deserializing arbitrary types needs metadata that trimming can remove; use Json(JsonTypeInfo<T>) in trimmed or AOT apps.")]
     [RequiresDynamicCode("Deserializing arbitrary types can need runtime code generation; use Json(JsonTypeInfo<T>) in AOT apps.")]
-    public T? Json<T>() => JsonSerializer.Deserialize<T>(Response.Text, JsonOptions);
+    public T? Json<T>() => JsonSerializer.Deserialize<T>(Response.TextMemory.Span, JsonOptions);
 
     /// <summary>The body deserialized from JSON with source-generated metadata (trimming and AOT safe).</summary>
-    public T? Json<T>(JsonTypeInfo<T> typeInfo) => JsonSerializer.Deserialize(Response.Text, typeInfo);
+    public T? Json<T>(JsonTypeInfo<T> typeInfo) => JsonSerializer.Deserialize(Response.TextMemory.Span, typeInfo);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -135,9 +157,11 @@ public sealed class ScrapeContext
     /// Emits an item of any type. Items reach the consumer when the handler finishes; if the handler throws, its items are
     /// dropped, so a retried page does not give duplicates. Thread-safe.
     /// </summary>
+    /// <exception cref="ArgumentException">The item is a parser object or the context: they belong to the page.</exception>
     public void Emit(object item)
     {
         ArgumentNullException.ThrowIfNull(item);
+        ThrowIfPageBound(item, nameof(item));
         lock (_lock)
         {
             ThrowIfCompleted();
@@ -145,21 +169,53 @@ public sealed class ScrapeContext
         }
     }
 
-    /// <summary>Ends the context: later calls throw. Returns the emitted items.</summary>
+    /// <summary>
+    /// Ends the context and lets the page go: later calls throw, the parser is disposed, and a context or a tag kept by mistake
+    /// does not keep the page in memory. Returns the emitted items.
+    /// </summary>
     internal List<object>? Complete()
     {
+        HtmlParser? html;
+        List<object>? items;
         lock (_lock)
         {
             _completed = true;
-            return _items;
+            html = _html;
+            items = _items;
+            _html = null;
+            _sitemap = null;
+            _items = null;
+            Volatile.Write(ref _response, null);
+        }
+        html?.Dispose();
+        return items;
+    }
+
+    /// <summary>
+    /// Parser objects and the context belong to the page: the parser is disposed when the handler ends, and until then each of
+    /// them keeps the whole page in memory. Items and request data carry values taken from the page.
+    /// </summary>
+    internal static void ThrowIfPageBound(object? value, string paramName)
+    {
+        var what = value switch
+        {
+            IEnumerable<ParserTag> => "z3l.FastHtmlParser objects (HtmlParser, ParserTag, lists of tags)",
+            ScrapeContext => "the ScrapeContext",
+            _ => null,
+        };
+        if (what != null)
+        {
+            throw new ArgumentException(
+                $"Items and request data cannot be {what}: they belong to the page, which is let go when the handler ends. "
+                + "Take the values you need: Text(), AttributeHref(), XPathValue()...", paramName);
         }
     }
 
     private void ThrowIfCompleted()
     {
-        if (_completed)
-        {
-            throw new InvalidOperationException("The handler has finished: Emit and Enqueue work only while it runs (await the work started in the handler)");
-        }
+        if (_completed) throw Finished();
     }
+
+    private static InvalidOperationException Finished() =>
+        new("The handler has finished: the page, Emit and Enqueue are there only while it runs (await the work started in the handler)");
 }

@@ -139,4 +139,29 @@ public sealed class IntegrationTests
         Assert.AreEqual(2, result.Stats.Loads);
         StringAssert.Contains(result.Failed[0].Message, "load error");
     }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task HttpPageLoader_ReadsBodiesOfAnySize_AndStopsAtTheLimitWhileReading()
+    {
+        await using var site = await TestSite.StartAsync();
+        using var limited = new HttpPageLoader(new HttpPageLoaderOptions { MaxResponseBytes = 1024 * 1024 });
+        using var unlimited = new HttpPageLoader(new HttpPageLoaderOptions { MaxResponseBytes = 0 });
+
+        // around the first buffer (64 KB) and well past it, without a Content-Length
+        foreach (var kb in new[] { 0, 1, 63, 64, 65, 700, 1024 })
+        {
+            var body = (await limited.LoadAsync(new ScrapeRequest(site.Url($"/chunked/{kb}")), CancellationToken.None)).Body;
+            Assert.HasCount(kb * 1024, body, $"{kb} KB");
+            for (var i = 0; i < body.Length; i++)
+            {
+                if (body[i] != (byte)(i % 251)) Assert.Fail($"{kb} KB: byte {i} is {body[i]}");
+            }
+        }
+
+        Assert.HasCount(3000 * 1024, (await unlimited.LoadAsync(new ScrapeRequest(site.Url("/chunked/3000")), CancellationToken.None)).Body);
+        Assert.HasCount(2 * 1024 * 1024, (await unlimited.LoadAsync(new ScrapeRequest(site.Url("/big")), CancellationToken.None)).Body);  // with a Content-Length
+        var error = await Assert.ThrowsExactlyAsync<NonRetryableException>(() => limited.LoadAsync(new ScrapeRequest(site.Url("/chunked/1100")), CancellationToken.None));
+        StringAssert.Contains(error.Message, "MaxResponseBytes");
+    }
 }

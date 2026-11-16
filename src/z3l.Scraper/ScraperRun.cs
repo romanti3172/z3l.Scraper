@@ -158,6 +158,7 @@ internal sealed class ScraperRun : IAsyncDisposable
         {
             throw Scraper.WrongData(request.Label, route.DataType, request.Data);     // where the mistake is, not later in the handler
         }
+        ScrapeContext.ThrowIfPageBound(request.Data, nameof(request));
         _codec?.Check(request.Label, request.Data);
 
         var depth = parent == null ? 0 : parent.Depth + 1;
@@ -289,82 +290,94 @@ internal sealed class ScraperRun : IAsyncDisposable
         Stats.AddLoad();
 
         PageResponse? response = null;
-        ValidationResult verdict;
-        Exception? loadError = null;
-
-        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
+        try
         {
-            if (_options.RequestTimeout != Timeout.InfiniteTimeSpan) timeout.CancelAfter(_options.RequestTimeout);
-            try
+            ValidationResult verdict;
+            Exception? loadError = null;
+
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
-                response = await _scraper.Loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
-                           ?? throw new InvalidOperationException($"{_scraper.Loader.GetType().Name}.LoadAsync returned null");
-                verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
+                if (_options.RequestTimeout != Timeout.InfiniteTimeSpan) timeout.CancelAfter(_options.RequestTimeout);
+                try
+                {
+                    response = await _scraper.Loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
+                               ?? throw new InvalidOperationException($"{_scraper.Loader.GetType().Name}.LoadAsync returned null");
+                    verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
+                }
+                catch (NonRetryableException ex) when (!token.IsCancellationRequested)
+                {
+                    Fail(request, FailureReason.NonRetryable, ex.Message, response?.StatusCode, ex);
+                    return;
+                }
+                catch (Exception ex) when (!token.IsCancellationRequested)
+                {
+                    loadError = ex;
+                    verdict = ex is OperationCanceledException
+                        ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
+                        : ValidationResult.Retry($"load error: {ex.Message}");
+                }
             }
-            catch (NonRetryableException ex) when (!token.IsCancellationRequested)
+
+            if (_options.AutoThrottle && response != null)
             {
-                Fail(request, FailureReason.NonRetryable, ex.Message, response?.StatusCode, ex);
-                return;
+                if (verdict.Outcome == ValidationOutcome.Blocked || response.StatusCode is 429 or 503)
+                {
+                    _throttle.OnOverloaded(host, RetryAfter(response), verdict.Reason ?? $"status {response.StatusCode}");
+                }
+                else if (verdict.Outcome == ValidationOutcome.Ok)
+                {
+                    _throttle.OnSuccess(host);
+                }
             }
-            catch (Exception ex) when (!token.IsCancellationRequested)
+
+            switch (verdict.Outcome)
             {
-                loadError = ex;
-                verdict = ex is OperationCanceledException
-                    ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
-                    : ValidationResult.Retry($"load error: {ex.Message}");
+                case ValidationOutcome.Ok:
+                    var (handled, items) = await HandleAsync(request, response!, host, token).ConfigureAwait(false);
+                    // the handler is done with the page (its parser is disposed): the text goes back to the pool,
+                    // and the page must not wait in memory for a slow consumer
+                    response!.ReleaseText();
+                    response = null;
+                    if (handled) await DeliverAsync(request, items, token).ConfigureAwait(false);
+                    break;
+
+                case ValidationOutcome.NotFound:
+                    request.NotFoundCount++;
+                    if (request.NotFoundCount <= _options.NotFoundRetries)
+                    {
+                        ScheduleRetry(request, verdict.Reason!, null);
+                    }
+                    else
+                    {
+                        Fail(request, FailureReason.NotFound, verdict.Reason!, response?.StatusCode, null);
+                    }
+                    break;
+
+                case ValidationOutcome.Blocked:
+                    ReportBlocked(request, response, verdict.Reason!);
+                    RetryOrFail(request, $"blocked: {verdict.Reason}", response, null);
+                    break;
+
+                default:
+                    RetryOrFail(request, verdict.Reason!, response, loadError);
+                    break;
             }
         }
-
-        if (_options.AutoThrottle && response != null)
+        finally
         {
-            if (verdict.Outcome == ValidationOutcome.Blocked || response.StatusCode is 429 or 503)
-            {
-                _throttle.OnOverloaded(host, RetryAfter(response), verdict.Reason ?? $"status {response.StatusCode}");
-            }
-            else if (verdict.Outcome == ValidationOutcome.Ok)
-            {
-                _throttle.OnSuccess(host);
-            }
-        }
-
-        switch (verdict.Outcome)
-        {
-            case ValidationOutcome.Ok:
-                await HandleAsync(request, response!, host, token).ConfigureAwait(false);
-                break;
-
-            case ValidationOutcome.NotFound:
-                request.NotFoundCount++;
-                if (request.NotFoundCount <= _options.NotFoundRetries)
-                {
-                    ScheduleRetry(request, verdict.Reason!, null);
-                }
-                else
-                {
-                    Fail(request, FailureReason.NotFound, verdict.Reason!, response?.StatusCode, null);
-                }
-                break;
-
-            case ValidationOutcome.Blocked:
-                ReportBlocked(request, response, verdict.Reason!);
-                RetryOrFail(request, $"blocked: {verdict.Reason}", response, null);
-                break;
-
-            default:
-                RetryOrFail(request, verdict.Reason!, response, loadError);
-                break;
+            response?.ReleaseText();    // a page that is retried, failed or abandoned
         }
     }
 
-    private async Task HandleAsync(ScrapeRequest request, PageResponse response, string host, CancellationToken token)
+    /// <summary>Runs the handler. Handled: its items; not handled: the request is already retried or failed.</summary>
+    private async Task<(bool Handled, List<object>? Items)> HandleAsync(ScrapeRequest request, PageResponse response, string host, CancellationToken token)
     {
         var handler = _scraper.FindRoute(request.Label)!.Handler;
         var context = new ScrapeContext(this, request, response, token);
-        List<object>? items;
         try
         {
             await handler(context).ConfigureAwait(false);
-            items = context.Complete();
+            return (true, context.Complete());
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
         {
@@ -394,9 +407,17 @@ internal sealed class ScraperRun : IAsyncDisposable
                     }
                     break;
             }
-            return;
+            return (false, null);
         }
+        finally
+        {
+            context.Complete();     // also when the run stops: the parser is disposed before the page text is released
+        }
+    }
 
+    /// <summary>Hands the items of a handled page to the consumer and finishes the request.</summary>
+    private async Task DeliverAsync(ScrapeRequest request, List<object>? items, CancellationToken token)
+    {
         if (items is not { Count: > 0 })
         {
             Forget(request);

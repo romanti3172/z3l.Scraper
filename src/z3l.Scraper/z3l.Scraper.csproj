@@ -38,7 +38,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="z3l.FastHtmlParser" Version="1.3.0" />
+    <PackageReference Include="z3l.FastHtmlParser" Version="1.4.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
   </ItemGroup>
 

@@ -108,6 +108,19 @@ internal sealed class TestSite : IAsyncDisposable
             return Results.Content($"<html><body>{text}</body></html>", "text/html");
         });
         app.MapGet("/big", () => Results.Bytes(new byte[2 * 1024 * 1024], "application/octet-stream"));
+        app.MapGet("/chunked/{kb:int}", async (int kb, HttpResponse response) =>
+        {
+            // no Content-Length: the loader learns the size only by reading; byte i is i % 251
+            response.ContentType = "application/octet-stream";
+            var piece = new byte[7 * 1024];
+            for (var sent = 0; sent < kb * 1024; sent += piece.Length)
+            {
+                var size = Math.Min(piece.Length, kb * 1024 - sent);
+                for (var i = 0; i < size; i++) piece[i] = (byte)((sent + i) % 251);
+                await response.Body.WriteAsync(piece.AsMemory(0, size));
+                await response.Body.FlushAsync();
+            }
+        });
         app.MapGet("/cookie/set", (HttpResponse response) =>
         {
             response.Cookies.Append("session", "abc123");

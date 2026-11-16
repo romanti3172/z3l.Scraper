@@ -163,6 +163,14 @@ scraper.Route(PageType.Item, ctx =>
 Any other exception fails the request with `FailureReason.HandlerError` (set `Options.RetryOnHandlerError` to retry it).
 Items emitted by a handler that throws are dropped.
 
+A page lives only while its handler runs: then the parser is disposed and the page is let go, even if the consumer is
+slow to take the items. Items and request data carry values taken from the page (`Text()`, `AttributeHref()`,
+`XPathValue()`...); `Emit` and `Enqueue` refuse tags, the parser and the context, a tag kept anyway throws
+`ObjectDisposedException`, and a kept context no longer holds the page. So the scraper holds at most `MaxConcurrency`
+pages and `ItemBufferSize` items; what grows with a run is the set of seen URLs (for duplicates) and the list of
+failed requests. The text of a page is decoded into a pooled buffer that the response checks, `ctx.Html` and `ctx.Json`
+read in place: a string of it is made only when a handler reads `ctx.Response.Text`.
+
 ## Response checks
 
 ```csharp

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -21,18 +22,26 @@ public sealed partial class PageResponse
     {
         StatusCode = statusCode;
         Url = url;
-        Body = body ?? [];
+        _body = body ?? [];
         ContentType = contentType;
         Headers = headers ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
-    /// <summary>Creates a response from text (loaders that get text, such as browsers).</summary>
-    public static PageResponse FromText(int statusCode, string url, string text, string? contentType = null, IReadOnlyDictionary<string, string>? headers = null)
+    private PageResponse(int statusCode, string url, string text, string? contentType, IReadOnlyDictionary<string, string>? headers)
     {
-        var response = new PageResponse(statusCode, url, Encoding.UTF8.GetBytes(text ?? string.Empty), contentType, headers);
-        response._text = text ?? string.Empty;
-        return response;
+        StatusCode = statusCode;
+        Url = url;
+        _text = text;
+        ContentType = contentType;
+        Headers = headers ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Creates a response from text (loaders that get text, such as browsers). <see cref="Body"/> is made from the text
+    /// only if something asks for it, so the page is not kept twice.
+    /// </summary>
+    public static PageResponse FromText(int statusCode, string url, string text, string? contentType = null, IReadOnlyDictionary<string, string>? headers = null) =>
+        new(statusCode, url, text ?? string.Empty, contentType, headers);
 
     /// <summary>HTTP status code.</summary>
     public int StatusCode { get; }
@@ -40,8 +49,19 @@ public sealed partial class PageResponse
     /// <summary>Final URL after redirects.</summary>
     public string Url { get; }
 
-    /// <summary>Raw body.</summary>
-    public byte[] Body { get; }
+    /// <summary>Raw body; for a response made from text, the text in UTF-8.</summary>
+    public byte[] Body => Volatile.Read(ref _body) ?? EncodeText();
+
+    private byte[]? _body;
+
+    private byte[] EncodeText()
+    {
+        var bytes = Encoding.UTF8.GetBytes(_text!);
+        return Interlocked.CompareExchange(ref _body, bytes, null) ?? bytes;
+    }
+
+    /// <summary>The body is not empty (without making the bytes of a text response).</summary>
+    internal bool HasBody => Volatile.Read(ref _body) is { } body ? body.Length > 0 : _text!.Length > 0;
 
     /// <summary>Content-Type header.</summary>
     public string? ContentType { get; }
@@ -54,7 +74,9 @@ public sealed partial class PageResponse
 
     /// <summary>
     /// Body decoded as text, the way browsers do it: a byte order mark, then the charset from Content-Type,
-    /// then &lt;meta charset&gt; or the XML declaration (HTML and XML only), then UTF-8. Decoded once on first use.
+    /// then &lt;meta charset&gt; or the XML declaration (HTML and XML only), then UTF-8. Made once on first use.
+    /// The scraper reads pages without this string (the response checks, <see cref="ScrapeContext.Html"/>,
+    /// <see cref="ScrapeContext.Json{T}()"/>), so a page becomes a string only when a handler asks for it.
     /// </summary>
     public string Text => _text ??= Decode();
 
@@ -62,18 +84,75 @@ public sealed partial class PageResponse
 
     private string Decode()
     {
-        if (Body.Length == 0) return string.Empty;
-
-        var span = Body.AsSpan();
-        if (span.StartsWith(Encoding.UTF8.Preamble)) return Encoding.UTF8.GetString(span[3..]);
-        if (span.StartsWith(Encoding.Unicode.Preamble)) return Encoding.Unicode.GetString(span[2..]);
-        if (span.StartsWith(Encoding.BigEndianUnicode.Preamble)) return Encoding.BigEndianUnicode.GetString(span[2..]);
-
-        var encoding = GetEncoding(CharsetFromContentType(ContentType))
-                       ?? (IsMarkup(ContentType) ? GetEncoding(CharsetFromMarkup(Body)) : null)
-                       ?? Encoding.UTF8;
-        return encoding.GetString(Body);
+        if (!HasBody) return string.Empty;
+        var encoding = DetectEncoding(out var preamble);
+        return encoding.GetString(Body.AsSpan(preamble));
     }
+
+    /// <summary>The encoding of the body and the length of its byte order mark.</summary>
+    private Encoding DetectEncoding(out int preamble)
+    {
+        var span = Body.AsSpan();
+        if (span.StartsWith(Encoding.UTF8.Preamble)) { preamble = 3; return Encoding.UTF8; }
+        if (span.StartsWith(Encoding.Unicode.Preamble)) { preamble = 2; return Encoding.Unicode; }
+        if (span.StartsWith(Encoding.BigEndianUnicode.Preamble)) { preamble = 2; return Encoding.BigEndianUnicode; }
+
+        preamble = 0;
+        return GetEncoding(CharsetFromContentType(ContentType))
+               ?? (IsMarkup(ContentType) ? GetEncoding(CharsetFromMarkup(Body)) : null)
+               ?? Encoding.UTF8;
+    }
+
+    // While the scraper handles a page, its text is decoded into a pooled buffer instead of a string: the response checks
+    // and the parser read it in place, and it goes back to the pool when the handler ends (ReleaseText).
+    private char[]? _chars;
+    private int _charCount;
+    private bool _released;
+
+    /// <summary>Bigger pages become strings: the pool should not keep huge arrays.</summary>
+    private const int MaxPooledChars = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// The text without making a string: the string if there is one, otherwise the text decoded into a pooled buffer,
+    /// valid until <see cref="ReleaseText"/>. For the scraper, while it handles the page.
+    /// </summary>
+    internal ReadOnlyMemory<char> TextMemory
+    {
+        get
+        {
+            if (Volatile.Read(ref _text) is { } text) return text.AsMemory();
+            if (Volatile.Read(ref _chars) is { } chars) return chars.AsMemory(0, _charCount);
+            if (Volatile.Read(ref _released) || !HasBody) return Text.AsMemory();
+
+            var encoding = DetectEncoding(out var preamble);
+            var bytes = Body.AsSpan(preamble);
+            var maxChars = encoding.GetMaxCharCount(bytes.Length);
+            if (maxChars > MaxPooledChars) return Text.AsMemory();
+
+            var rented = ArrayPool<char>.Shared.Rent(maxChars);
+            var count = encoding.GetChars(bytes, rented);
+            _charCount = count;     // threads that decode at the same time get the same count
+            if (Interlocked.CompareExchange(ref _chars, rented, null) is { } first)
+            {
+                ArrayPool<char>.Shared.Return(rented);
+                return first.AsMemory(0, count);
+            }
+            return rented.AsMemory(0, count);
+        }
+    }
+
+    /// <summary>The scraper is done with the page: the pooled text goes back to the pool. <see cref="Text"/> still works.</summary>
+    internal void ReleaseText()
+    {
+        Volatile.Write(ref _released, true);
+        if (Interlocked.Exchange(ref _chars, null) is { } chars) ArrayPool<char>.Shared.Return(chars);
+    }
+
+    /// <summary>The text is in a pooled buffer.</summary>
+    internal bool HasPooledText => Volatile.Read(ref _chars) != null;
+
+    /// <summary>The text has been made into a string.</summary>
+    internal bool HasTextString => Volatile.Read(ref _text) != null;
 
     /// <summary>Finds an encoding by its label; labels that .NET does not know but sites use are mapped first.</summary>
     internal static Encoding? GetEncoding(string? charset)

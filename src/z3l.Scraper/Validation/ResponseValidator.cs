@@ -12,9 +12,9 @@ internal static class ResponseValidator
 
         if (rules.BlockedStatusCodes.Contains(status)) return ValidationResult.Blocked($"status {status}");
 
-        var hasBody = response.Body.Length > 0;
+        var hasBody = response.HasBody;
         var checkText = hasBody && rules.Content != ExpectedContent.Binary;
-        var text = checkText ? response.Text : string.Empty;
+        var text = checkText ? response.TextMemory.Span : default;     // read in place: no string per page
 
         if (checkText)
         {
@@ -56,7 +56,7 @@ internal static class ResponseValidator
         return ValidationResult.Ok;
     }
 
-    private static string? FindAny(string text, string[] parts)
+    private static string? FindAny(ReadOnlySpan<char> text, string[] parts)
     {
         foreach (var part in parts)
         {
@@ -65,9 +65,9 @@ internal static class ResponseValidator
         return null;
     }
 
-    private static bool LooksLikeJson(string text)
+    private static bool LooksLikeJson(ReadOnlySpan<char> text)
     {
-        var span = text.AsSpan().Trim();
+        var span = text.Trim();
         return span.Length >= 2 && ((span[0] == '{' && span[^1] == '}') || (span[0] == '[' && span[^1] == ']'));
     }
 }
