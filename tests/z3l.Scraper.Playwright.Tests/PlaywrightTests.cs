@@ -157,6 +157,43 @@ public sealed class PlaywrightTests
 
     [TestMethod]
     [Timeout(60_000, CooperativeCancellation = true)]
+    public async Task Socks5WithALogin_GoesThroughTheLocalRelay()
+    {
+        await using var socks = FakeSocks5.Start("user", "secret", new Uri(_site.BaseUrl).Port);
+        var options = Options();
+        options.Proxies = new ProxyList([$"socks5://user:secret@127.0.0.1:{socks.Port}"]);
+        await using var loader = new PlaywrightPageLoader(options);
+
+        var response = await LoadAsync(loader, "http://shop.test/title");
+
+        Assert.AreEqual(200, response.StatusCode);
+        StringAssert.Contains(response.Text, "<h1>Tea</h1>");
+        Assert.IsTrue(socks.Targets.Contains("shop.test:80"), "the host name reached the proxy: " + string.Join(", ", socks.Targets));
+    }
+
+    /// <summary>A real SOCKS5 proxy with a login (3proxy): Z3L_TEST_SOCKS5=socks5://user:password@host:port.</summary>
+    [TestMethod]
+    [Timeout(60_000, CooperativeCancellation = true)]
+    public async Task Socks5WithALogin_RealProxy()
+    {
+        if (Environment.GetEnvironmentVariable("Z3L_TEST_SOCKS5") is not { Length: > 0 } line || !ProxyAddress.TryParse(line, out var proxy))
+        {
+            Assert.Inconclusive("Set Z3L_TEST_SOCKS5=socks5://user:password@host:port to test a real proxy");
+            return;
+        }
+        var options = Options();
+        options.Proxies = new ProxyList([line]);
+        await using var loader = new PlaywrightPageLoader(options);
+
+        var response = await LoadAsync(loader, "https://api.ipify.org/");
+
+        Assert.AreEqual(200, response.StatusCode);
+        var addresses = await System.Net.Dns.GetHostAddressesAsync(proxy.Host);
+        Assert.IsTrue(addresses.Any(a => response.Text.Contains(a.ToString(), StringComparison.Ordinal)), "the site saw the proxy's address: " + response.Text);
+    }
+
+    [TestMethod]
+    [Timeout(60_000, CooperativeCancellation = true)]
     public async Task WorksUnderTheScraper_CancelledLoadsCloseTheirPages()
     {
         var options = Options();

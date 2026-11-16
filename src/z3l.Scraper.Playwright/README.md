@@ -47,7 +47,8 @@ or `pwsh bin/Debug/net10.0/playwright.ps1 install chromium` after a build. In Do
 - Images, media and fonts are not loaded (`BlockedResourceTypes`).
 - `ConfigureContext` sets the locale, viewport, time zone or geolocation of new contexts.
 
-Chromium does not support socks5 proxies with a login; use http proxies or Firefox for them.
+Browsers cannot log in to socks5 proxies, so a socks5 proxy with a login goes through a small relay on 127.0.0.1: the
+browser talks to it without a login, the relay logs in to the proxy and passes the connection on (TLS stays end to end).
 
 ## License
 

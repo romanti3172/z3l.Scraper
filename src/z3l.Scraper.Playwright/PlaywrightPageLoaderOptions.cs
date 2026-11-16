@@ -41,7 +41,8 @@ public sealed class PlaywrightPageLoaderOptions
 
     /// <summary>
     /// Proxies to rotate: every proxy has its own browser context (cookies, cache, user agent); a blocked answer rests the proxy for
-    /// the site, failures rest it for all sites. Chromium does not support socks5 proxies with a login.
+    /// the site, failures rest it for all sites. A socks5 proxy with a login goes through a local relay on 127.0.0.1 that logs in
+    /// for the browser (browsers cannot log in to socks5 proxies themselves).
     /// </summary>
     public ProxyList? Proxies { get; set; }
 

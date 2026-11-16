@@ -257,7 +257,10 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
             }
 
             if (session.Generation == Volatile.Read(ref _browserGeneration) && _browser?.IsConnected == true && !session.Retired) return session;
-            _sessions.TryRemove(new KeyValuePair<ProxyAddress, Lazy<Task<Session>>>(key, lazy));
+            if (_sessions.TryRemove(new KeyValuePair<ProxyAddress, Lazy<Task<Session>>>(key, lazy)) && !session.Retired)
+            {
+                _ = CloseSessionAsync(session);     // its browser is gone: free the relay
+            }
         }
     }
 
@@ -265,7 +268,14 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
     {
         var (browser, generation) = await GetBrowserAsync().ConfigureAwait(false);
         var options = new BrowserNewContextOptions { IgnoreHTTPSErrors = true };
-        if (!ReferenceEquals(key, NoProxy))
+        Socks5Relay? relay = null;
+        if (NeedsRelay(key))
+        {
+            // browsers cannot log in to socks5 proxies: they talk to a local relay without a login, the relay logs in
+            relay = new Socks5Relay(key, _logger);
+            options.Proxy = new Proxy { Server = relay.Server };
+        }
+        else if (!ReferenceEquals(key, NoProxy))
         {
             options.Proxy = new Proxy
             {
@@ -277,15 +287,27 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
         if (_options.UserAgents is { } agents) options.UserAgent = agents.Next();
         _options.ConfigureContext?.Invoke(options);
 
-        var context = await browser.NewContextAsync(options).ConfigureAwait(false);
-        if (_options.BlockedResourceTypes.Count > 0)
+        try
         {
-            var blocked = _options.BlockedResourceTypes;
-            await context.RouteAsync("**/*", route =>
-                blocked.Contains(route.Request.ResourceType) ? route.AbortAsync() : route.FallbackAsync()).ConfigureAwait(false);
+            var context = await browser.NewContextAsync(options).ConfigureAwait(false);
+            if (_options.BlockedResourceTypes.Count > 0)
+            {
+                var blocked = _options.BlockedResourceTypes;
+                await context.RouteAsync("**/*", route =>
+                    blocked.Contains(route.Request.ResourceType) ? route.AbortAsync() : route.FallbackAsync()).ConfigureAwait(false);
+            }
+            return new Session(key, context, generation, relay);
         }
-        return new Session(key, context, generation);
+        catch
+        {
+            if (relay != null) await relay.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
+
+    /// <summary>A socks5 proxy with a login goes through a <see cref="Socks5Relay"/>.</summary>
+    internal static bool NeedsRelay(ProxyAddress proxy) =>
+        proxy.UserName != null && string.Equals(proxy.Scheme, "socks5", StringComparison.OrdinalIgnoreCase);
 
     private async Task<(IBrowser Browser, int Generation)> GetBrowserAsync()
     {
@@ -362,6 +384,10 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
         {
             // the browser is gone already
         }
+        finally
+        {
+            if (session.Relay != null) await session.Relay.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private static async Task CloseBrowserQuietlyAsync(IBrowser browser)
@@ -383,7 +409,9 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
         await _browserLock.WaitAsync().ConfigureAwait(false);
         try
         {
+            var open = _sessions.Values.Where(l => l.IsValueCreated && l.Value.IsCompletedSuccessfully).Select(l => l.Value.Result).ToList();
             _sessions.Clear();
+            foreach (var session in open) await CloseSessionAsync(session).ConfigureAwait(false);
             if (_browser != null) await CloseBrowserQuietlyAsync(_browser).ConfigureAwait(false);
             _browser = null;
             _playwright?.Dispose();
@@ -398,11 +426,12 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
     /// <inheritdoc />
     public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
 
-    private sealed class Session(ProxyAddress key, IBrowserContext context, int generation)
+    private sealed class Session(ProxyAddress key, IBrowserContext context, int generation, Socks5Relay? relay)
     {
         public ProxyAddress Key { get; } = key;
         public IBrowserContext Context { get; } = context;
         public int Generation { get; } = generation;
+        public Socks5Relay? Relay { get; } = relay;
         public volatile bool Retired;
         public int OpenPages;
         public int Closed;

@@ -489,3 +489,6 @@ benchmarks/.venv/
 benchmarks/go/bin/
 benchmarks/rust/target/
 benchmarks/java/target/
+
+# local test secrets
+*.local.env
