@@ -49,7 +49,7 @@ internal static class ResponseValidator
 
         foreach (var custom in rules.Custom)
         {
-            var result = custom(request, response);
+            var result = custom(request, response, text);
             if (result.Outcome != ValidationOutcome.Ok) return result with { Reason = result.Reason ?? "custom check" };
         }
 

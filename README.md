@@ -186,9 +186,9 @@ options.Rules[PageType.Item].MustContain.Add("itemprop=\"price\"");
 options.Rules[PageType.Item].NotFoundMarkers.Add("Product not found");
 options.Rules["reviews-api"].Content = ExpectedContent.Json;
 
-// your own check
-options.Rules[PageType.Item].Custom = (request, response) =>
-    response.Text.Length < 5000 ? ValidationResult.Retry("page too short") : ValidationResult.Ok;
+// your own check; text is the page read in place (no string), valid during the call
+options.Rules[PageType.Item].Custom = (request, response, text) =>
+    text.Length < 5000 ? ValidationResult.Retry("page too short") : ValidationResult.Ok;
 ```
 
 Checks run in this order; the first that matches decides:

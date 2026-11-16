@@ -240,13 +240,35 @@ public sealed class ScraperTests
     {
         var loader = new FakeLoader().Responses("https://s.test/a", (200, Html("tiny")), (200, Html(new string('x', 200))));
         var options = FastOptions();
-        options.Rules.Default.Custom = (_, response) => response.Body.Length < 100 ? ValidationResult.Blocked("too short") : ValidationResult.Ok;
+        options.Rules.Default.Custom = (_, response, _) => response.Body.Length < 100 ? ValidationResult.Blocked("too short") : ValidationResult.Ok;
         var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit("ok"));
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
         Assert.AreEqual(1, result.Stats.Blocked);
         Assert.HasCount(1, result.Items);
+    }
+
+    [TestMethod]
+    public async Task CustomRule_ReadsTheTextInPlace()
+    {
+        var loads = 0;
+        var loader = new DelegateLoader((r, _) => Task.FromResult(new PageResponse(200, r.Url,
+            System.Text.Encoding.UTF8.GetBytes(Html(Interlocked.Increment(ref loads) == 1 ? "Цена: нет" : "Цена: 10")), "text/html; charset=utf-8")));
+        var options = FastOptions();
+        var madeString = false;
+        options.Rules.Default.Custom = (_, response, text) =>
+        {
+            madeString |= response.HasTextString;
+            return text.Contains("Цена: 10", StringComparison.Ordinal) ? ValidationResult.Ok : ValidationResult.Retry("no price");
+        };
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Response));
+
+        var result = await scraper.RunToListAsync("https://s.test/a");
+
+        Assert.AreEqual(1, result.Stats.Retries);
+        Assert.IsFalse(madeString, "the check got the page without a string");
+        Assert.IsFalse(((PageResponse)result.Items.Single()).HasTextString);
     }
 
     // ------------------------------------------------------------------ handlers
