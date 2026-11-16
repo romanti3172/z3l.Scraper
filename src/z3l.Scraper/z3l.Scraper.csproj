@@ -13,11 +13,14 @@
     <PackageId>z3l.Scraper</PackageId>
     <Description>Block-aware web scraping engine for .NET 9/10: request queue with priorities and de-duplication, retries with backoff, response checks (blocked, not found, cut-off pages), rotating http/socks proxies and user agents from a file or a URL with block policies, per-host throttling on 429/503, robots.txt, sitemaps, link depth, runs that resume after a crash, routing by page type or label with typed page data, async handlers and streamed results of any type. HTML is parsed with z3l.FastHtmlParser.</Description>
     <PackageTags>scraper;web-scraping;webscraping;crawler;web-crawler;crawling;spider;scraping;html;parser;retry;throttling;robots.txt;sitemap;proxy;dotnet;csharp;net9;net10</PackageTags>
+    <Title>z3l Scraper</Title>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon.png" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

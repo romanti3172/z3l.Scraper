@@ -38,7 +38,7 @@ public sealed class Socks5RelayTests
         var reply = await ReadAsync(client.GetStream(), 10);
 
         Assert.AreEqual(2, reply[1], "connection not allowed");
-        Assert.AreEqual(0, upstream.Targets.Count);
+        Assert.IsEmpty(upstream.Targets);
     }
 
     [TestMethod]

@@ -32,7 +32,7 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 ## Install
 
 ```
-dotnet add package z3l.Scraper
+dotnet add package z3l.Scraper --prerelease
 ```
 
 ## Quick start
@@ -406,7 +406,7 @@ retries that. A loader throws `NonRetryableException` when another attempt canno
 rotate proxies with `ProxyList` too: `AcquireAsync(host)` gives the next proxy that may load from the site, and
 `ReportSuccess`, `ReportFailure`, `ReportBlocked`, `ReportBadResponse` and `ReportGoodResponse` tell the list how it went.
 
-[z3l.Scraper.Playwright](src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
+[z3l.Scraper.Playwright](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
 browser context per proxy.
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
@@ -425,4 +425,4 @@ var scraper = new Scraper(loader, options, loggerFactory.CreateLogger("scraper")
 ## License
 
 Free for companies under USD 1M annual revenue and under 100 employees; others need a commercial license.
-See [LICENSE.md](LICENSE.md). z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.
+See [LICENSE.md](https://github.com/romanti3172/z3l.Scraper/blob/main/LICENSE.md). z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.

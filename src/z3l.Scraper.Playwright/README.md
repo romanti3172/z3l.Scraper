@@ -4,6 +4,10 @@ A headless browser page loader for [z3l.Scraper](https://www.nuget.org/packages/
 [Microsoft Playwright](https://playwright.dev/dotnet/): for sites that draw their pages with scripts or block plain HTTP
 clients. The scraper's queue, retries, response checks and throttling work on top, as with `HttpPageLoader`.
 
+```
+dotnet add package z3l.Scraper.Playwright --prerelease
+```
+
 ```csharp
 using z3l.Scraper;
 using z3l.Scraper.Loading;

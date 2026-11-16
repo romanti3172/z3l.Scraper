@@ -11,11 +11,14 @@
     <PackageId>z3l.Scraper.Playwright</PackageId>
     <Description>Headless browser page loader for z3l.Scraper on Microsoft Playwright: Chromium, Firefox or WebKit, a browser context per proxy with its own cookies and user agent, rotating proxies and user agents from a file or a URL, blocked images and fonts, waiting for a selector, a session that starts anew after a block.</Description>
     <PackageTags>scraper;web-scraping;crawler;playwright;headless;browser;chromium;proxy;dotnet;net9;net10</PackageTags>
+    <Title>z3l Scraper Playwright</Title>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon-playwright.png" Pack="true" PackagePath="\icon.png" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>
