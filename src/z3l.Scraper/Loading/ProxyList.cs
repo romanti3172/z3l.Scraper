@@ -37,7 +37,7 @@ public sealed partial record ProxyAddress(string Scheme, string Host, int Port, 
     public override string ToString() => UserName == null ? $"{Scheme}://{Host}:{Port}" : $"{Scheme}://{UserName}@{Host}:{Port}";
 
     /// <summary>Identity of the proxy, login included (two logins on one proxy are two proxies).</summary>
-    internal string Key => $"{Scheme}://{UserName}:{Password}@{Host}:{Port}";
+    internal string Key =>$"{Scheme}://{UserName}:{Password}@{Host}:{Port}";
 
     internal WebProxy ToWebProxy() => new(Uri)
     {
@@ -213,11 +213,16 @@ public sealed class ProxyList
                $"{status.Count(s => s.BlockedSites > 0)} blocked on some site; {status.Sum(s => s.Loads)} loads, {status.Sum(s => s.Blocks)} blocks";
     }
 
-    // ---------------------------------------------------------------- for the loader
+    // ---------------------------------------------------------------- for loaders
 
-    /// <summary>The next proxy that may load from <paramref name="site"/>; waits while every proxy rests for it.</summary>
+    /// <summary>
+    /// The next proxy that may load from <paramref name="site"/>; waits while every proxy rests for it. A loader reports how the
+    /// load went with <see cref="ReportSuccess"/>, <see cref="ReportFailure"/> or <see cref="ReportBlocked"/>.
+    /// </summary>
+    /// <param name="site">Host of the page.</param>
+    /// <param name="cancellationToken">Ends the wait.</param>
     /// <exception cref="NonRetryableException">Every proxy is removed for the site (<see cref="ProxyBlockPolicy.Remove"/>).</exception>
-    internal async Task<Entry> AcquireAsync(string site, CancellationToken cancellationToken)
+    public async Task<Entry> AcquireAsync(string site, CancellationToken cancellationToken)
     {
         while (true)
         {
@@ -254,8 +259,10 @@ public sealed class ProxyList
         }
     }
 
-    internal void ReportSuccess(Entry entry)
+    /// <summary>The proxy gave an answer: its failures in a row start again.</summary>
+    public void ReportSuccess(Entry entry)
     {
+        ArgumentNullException.ThrowIfNull(entry);
         lock (_lock)
         {
             entry.Successes++;
@@ -263,8 +270,10 @@ public sealed class ProxyList
         }
     }
 
-    internal void ReportFailure(Entry entry, string reason)
+    /// <summary>No answer through the proxy (no connection, 407...): after <see cref="MaxConsecutiveFailures"/> in a row it rests for every site.</summary>
+    public void ReportFailure(Entry entry, string reason)
     {
+        ArgumentNullException.ThrowIfNull(entry);
         lock (_lock)
         {
             entry.Failures++;
@@ -275,8 +284,10 @@ public sealed class ProxyList
         _logger.LogWarning("Proxy {Proxy} failed {Count} times in a row ({Reason}): it rests {Pause}", entry.Address, MaxConsecutiveFailures, reason, DeadProxyPause);
     }
 
-    internal void ReportBlocked(Entry entry, string site)
+    /// <summary>A site blocked an answer of the proxy: it rests for that site as <see cref="BlockPolicy"/> says.</summary>
+    public void ReportBlocked(Entry entry, string site)
     {
+        ArgumentNullException.ThrowIfNull(entry);
         TimeSpan? rest = BlockPolicy switch
         {
             ProxyBlockPolicy.Block10Minutes => TimeSpan.FromMinutes(10),
@@ -323,16 +334,24 @@ public sealed class ProxyList
         return entries;
     }
 
-    internal sealed class Entry(ProxyAddress address)
+    /// <summary>A proxy of the list, given to a load by <see cref="AcquireAsync"/>.</summary>
+    public sealed class Entry
     {
-        public ProxyAddress Address { get; } = address;
-        public Dictionary<string, DateTimeOffset> BlockedSites { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public DateTimeOffset DeadUntil;
-        public int FailuresInARow;
-        public long Loads, Successes, Failures, Blocks;
+        internal Entry(ProxyAddress address) => Address = address;
 
-        public DateTimeOffset BlockedUntil(string site) => BlockedSites.TryGetValue(site, out var until) ? until : DateTimeOffset.MinValue;
+        /// <summary>The proxy.</summary>
+        public ProxyAddress Address { get; }
 
-        public int CountBlockedSites(DateTimeOffset now) => BlockedSites.Count(b => b.Value > now);
+        internal Dictionary<string, DateTimeOffset> BlockedSites { get; } = new(StringComparer.OrdinalIgnoreCase);
+        internal DateTimeOffset DeadUntil;
+        internal int FailuresInARow;
+        internal long Loads, Successes, Failures, Blocks;
+
+        internal DateTimeOffset BlockedUntil(string site) => BlockedSites.TryGetValue(site, out var until) ? until : DateTimeOffset.MinValue;
+
+        internal int CountBlockedSites(DateTimeOffset now) => BlockedSites.Count(b => b.Value > now);
+
+        /// <summary>The proxy, without its password.</summary>
+        public override string ToString() => Address.ToString();
     }
 }

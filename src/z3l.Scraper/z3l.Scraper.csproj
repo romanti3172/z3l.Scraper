@@ -1,40 +1,23 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- shared settings and the version: ..\Directory.Build.props -->
+
   <PropertyGroup>
-    <TargetFrameworks>net9.0;net10.0</TargetFrameworks>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
     <RootNamespace>z3l.Scraper</RootNamespace>
     <AssemblyName>z3l.Scraper</AssemblyName>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <!-- NuGet audit: a new advisory on a dependency or a build tool is reported, but does not break the build -->
-    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
     <IsAotCompatible>true</IsAotCompatible>
     <EnablePackageValidation>true</EnablePackageValidation>
   </PropertyGroup>
 
   <PropertyGroup Label="Package">
     <PackageId>z3l.Scraper</PackageId>
-    <Version>0.1.0-preview.5</Version>
-    <Authors>z3l</Authors>
-    <Copyright>Copyright © 2026 z3l</Copyright>
-    <Description>Block-aware web scraping engine for .NET 9/10: request queue with priorities and de-duplication, retries with backoff, response checks (blocked, not found, cut-off pages), rotating http/socks proxies from a file with block policies, per-host throttling on 429/503, robots.txt, sitemaps, link depth, runs that resume after a crash, routing by page type or label with typed page data, async handlers and streamed results of any type. HTML is parsed with z3l.FastHtmlParser.</Description>
+    <Description>Block-aware web scraping engine for .NET 9/10: request queue with priorities and de-duplication, retries with backoff, response checks (blocked, not found, cut-off pages), rotating http/socks proxies and user agents from a file or a URL with block policies, per-host throttling on 429/503, robots.txt, sitemaps, link depth, runs that resume after a crash, routing by page type or label with typed page data, async handlers and streamed results of any type. HTML is parsed with z3l.FastHtmlParser.</Description>
     <PackageTags>scraper;web-scraping;webscraping;crawler;web-crawler;crawling;spider;scraping;html;parser;retry;throttling;robots.txt;sitemap;proxy;dotnet;csharp;net9;net10</PackageTags>
-    <PackageProjectUrl>https://romanti3172.github.io/z3l.Scraper/</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/romanti3172/z3l.Scraper</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
-    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
-    <None Include="..\..\LICENSE.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>

@@ -3,9 +3,11 @@
     <Project Path="samples/QuickStart/QuickStart.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/z3l.Scraper.Playwright/z3l.Scraper.Playwright.csproj" />
     <Project Path="src/z3l.Scraper/z3l.Scraper.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/z3l.Scraper.Playwright.Tests/z3l.Scraper.Playwright.Tests.csproj" />
     <Project Path="tests/z3l.Scraper.Tests/z3l.Scraper.Tests.csproj" />
   </Folder>
 </Solution>

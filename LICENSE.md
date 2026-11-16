@@ -80,3 +80,8 @@ The Software uses z3l.FastHtmlParser, which is licensed separately under its own
 (https://www.nuget.org/packages/z3l.FastHtmlParser). Its free and commercial terms follow the
 same thresholds: a Licensee that needs a Commercial License of the Software needs one of
 z3l.FastHtmlParser as well.
+
+The z3l.Scraper.Playwright package depends on Microsoft.Playwright, which is licensed separately
+under the Apache License 2.0 (https://github.com/microsoft/playwright-dotnet). The browsers that
+Playwright downloads or uses (Chromium, Firefox, WebKit, Chrome, Edge) are licensed by their own
+authors. These components are not covered by this license, and this license adds no terms to them.

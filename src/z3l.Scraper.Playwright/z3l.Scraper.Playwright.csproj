@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- shared settings and the version: ..\Directory.Build.props -->
+
+  <PropertyGroup>
+    <RootNamespace>z3l.Scraper.Playwright</RootNamespace>
+    <AssemblyName>z3l.Scraper.Playwright</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>z3l.Scraper.Playwright</PackageId>
+    <Description>Headless browser page loader for z3l.Scraper on Microsoft Playwright: Chromium, Firefox or WebKit, a browser context per proxy with its own cookies and user agent, rotating proxies and user agents from a file or a URL, blocked images and fonts, waiting for a selector, a session that starts anew after a block.</Description>
+    <PackageTags>scraper;web-scraping;crawler;playwright;headless;browser;chromium;proxy;dotnet;net9;net10</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\z3l.Scraper\z3l.Scraper.csproj" />
+    <PackageReference Include="Microsoft.Playwright" Version="1.62.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="z3l.Scraper.Playwright.Tests" />
+  </ItemGroup>
+
+</Project>

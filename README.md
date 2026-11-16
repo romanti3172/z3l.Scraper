@@ -368,6 +368,9 @@ using var loader = new HttpPageLoader(new HttpPageLoaderOptions
 // or your own client (IHttpClientFactory, Polly...)
 var loader = new HttpPageLoader(httpClient);
 
+// or a headless browser: the z3l.Scraper.Playwright package
+await using var loader = new PlaywrightPageLoader(new PlaywrightPageLoaderOptions { Channel = "chrome", WaitForSelector = "div.product" });
+
 // or anything else
 public sealed class BrowserLoader : IBlockAwarePageLoader
 {
@@ -385,7 +388,12 @@ public sealed class BrowserLoader : IBlockAwarePageLoader
 ```
 
 A loader returns any HTTP status as a normal result and throws only when there is no response; the scraper
-retries that. A loader throws `NonRetryableException` when another attempt cannot help.
+retries that. A loader throws `NonRetryableException` when another attempt cannot help. A loader of your own can
+rotate proxies with `ProxyList` too: `AcquireAsync(host)` gives the next proxy that may load from the site, and
+`ReportSuccess`, `ReportFailure` and `ReportBlocked` tell the list how it went.
+
+[z3l.Scraper.Playwright](src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
+browser context per proxy.
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,
