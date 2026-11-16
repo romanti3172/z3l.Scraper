@@ -425,4 +425,4 @@ var scraper = new Scraper(loader, options, loggerFactory.CreateLogger("scraper")
 ## License
 
 Free for companies under USD 1M annual revenue and under 100 employees; others need a commercial license.
-See [LICENSE.md](https://github.com/romanti3172/z3l.Scraper/blob/main/LICENSE.md). z3l.FastHtmlParser, which the scraper uses, is licensed separately on the same terms.
+See [LICENSE.md](https://github.com/romanti3172/z3l.Scraper/blob/main/LICENSE.md). The commercial license is one payment of USD 1,000 for all z3l libraries, z3l.FastHtmlParser included.
