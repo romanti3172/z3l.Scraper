@@ -1,0 +1,9 @@
+{
+  "name": "z3l-scraper-benchmarks",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "crawlee": "^3.18.2",
+    "crawler": "^2.1.1"
+  }
+}

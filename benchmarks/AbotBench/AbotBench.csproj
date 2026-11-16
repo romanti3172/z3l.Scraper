@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Abot" Version="2.0.70" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Abot is a .NET Standard 2.0 package; its old dependencies have advisories we do not care about here -->
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
+</Project>

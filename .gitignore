@@ -483,3 +483,9 @@ $RECYCLE.BIN/
 
 # local Claude settings
 .claude/
+
+# benchmarks
+benchmarks/.venv/
+benchmarks/go/bin/
+benchmarks/rust/target/
+benchmarks/java/target/

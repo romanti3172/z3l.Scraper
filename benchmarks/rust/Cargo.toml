@@ -1,0 +1,13 @@
+[package]
+name = "spider_bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scraper = "0.29.0"
+serde_json = "1.0.154"
+spider = { version = "2.53.9", features = ["regex"] }
+tokio = { version = "1.54.1", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
