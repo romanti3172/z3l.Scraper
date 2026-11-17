@@ -5,5 +5,8 @@
   "dependencies": {
     "crawlee": "^3.18.2",
     "crawler": "^2.1.1"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   }
 }
