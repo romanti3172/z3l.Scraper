@@ -153,6 +153,9 @@ public sealed class CrawlingTests
         });
     }
 
+    private static DateTime[] LoadsOf(ConcurrentQueue<(string Url, DateTime At)> loads, string host) =>
+        loads.Where(l => l.Url.StartsWith($"https://{host}/")).Select(l => l.At).Order().ToArray();
+
     [TestMethod]
     public async Task AutoThrottle_SpacesTheOverloadedHost_OtherHostsKeepFullSpeed()
     {
@@ -161,18 +164,24 @@ public sealed class CrawlingTests
         options.AutoThrottle = true;
         options.MaxConcurrency = 4;
         options.MaxThrottleDelay = TimeSpan.FromMilliseconds(300);
-        var scraper = new Scraper(TwoHosts(loads), options).Route("default", _ => { });
+        // the start page links to the rest, so they are queued after its 429 (by its retry). Pages queued together with it
+        // would go to the other workers at once, and those that pass the throttle before the 429 is handled load at full
+        // speed: the throttle cannot know about a 429 that has not come back yet
+        var scraper = new Scraper(TwoHosts(loads), options).Route("default", ctx =>
+        {
+            if (ctx.Request.Depth > 0) return;
+            ctx.Enqueue(Enumerable.Range(1, 4).Select(i => $"https://a.test/{i}"));
+            ctx.Enqueue(Enumerable.Range(0, 20).Select(i => $"https://b.test/{i}"));
+        });
 
-        var requests = Enumerable.Range(0, 5).Select(i => (ScrapeRequest)$"https://a.test/{i}")
-            .Concat(Enumerable.Range(0, 20).Select(i => (ScrapeRequest)$"https://b.test/{i}"));
-        var result = await scraper.RunToListAsync(requests);
+        var result = await scraper.RunToListAsync("https://a.test/0");
 
         Assert.AreEqual(25, result.Stats.Succeeded);
-        var a = loads.Where(l => l.Url.StartsWith("https://a.test")).Select(l => l.At).Order().ToArray();
-        var b = loads.Where(l => l.Url.StartsWith("https://b.test")).Select(l => l.At).Order().ToArray();
+        var a = LoadsOf(loads, "a.test");
+        var b = LoadsOf(loads, "b.test");
         Assert.HasCount(6, a);          // 5 pages + the retry of the 429
-        // after the 429 the loads of a.test are about 300 ms apart (the delay shrinks by 10 % per success)
-        for (var i = 2; i < a.Length; i++)
+        // after the 429 every load of a.test is about 300 ms after the one before (the delay shrinks by 10 % per success)
+        for (var i = 1; i < a.Length; i++)
         {
             Assert.IsGreaterThanOrEqualTo(150, (a[i] - a[i - 1]).TotalMilliseconds, $"a.test load {i} came too soon");
         }
