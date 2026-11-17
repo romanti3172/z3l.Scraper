@@ -136,20 +136,24 @@ public sealed class CrawlingTests
 
     // ------------------------------------------------------------------ throttling
 
-    /// <summary>a.test answers 429 to its first request; b.test is always fine. Records when each page was loaded.</summary>
-    private static DelegateLoader TwoHosts(ConcurrentQueue<(string Url, DateTime At)> loads, string? retryAfter = null)
+    /// <summary>
+    /// a.test answers 429 to its first request; b.test is always fine, each page taking <paramref name="bLoadMs"/>.
+    /// Records when each page was loaded.
+    /// </summary>
+    private static DelegateLoader TwoHosts(ConcurrentQueue<(string Url, DateTime At)> loads, string? retryAfter = null, int bLoadMs = 0)
     {
         var first = 0;
-        return new DelegateLoader((r, _) =>
+        return new DelegateLoader(async (r, token) =>
         {
             loads.Enqueue((r.Url, DateTime.UtcNow));
             if (r.Url.StartsWith("https://a.test") && Interlocked.Exchange(ref first, 1) == 0)
             {
                 var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 if (retryAfter != null) headers["Retry-After"] = retryAfter;
-                return Task.FromResult(PageResponse.FromText(429, r.Url, "slow down", headers: headers));
+                return PageResponse.FromText(429, r.Url, "slow down", headers: headers);
             }
-            return Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html("ok")));
+            if (bLoadMs > 0 && r.Url.StartsWith("https://b.test")) await Task.Delay(bLoadMs, token);
+            return PageResponse.FromText(200, r.Url, ScraperTests.Html("ok"));
         });
     }
 
@@ -188,6 +192,35 @@ public sealed class CrawlingTests
         // b.test was not held back: it was done long before a.test
         Assert.IsLessThan(a[^1], b[^1]);
         Assert.IsGreaterThan(500, (a[^1] - b[^1]).TotalMilliseconds);
+    }
+
+    [TestMethod]
+    public async Task AutoThrottle_WorkersBusyWithOtherHosts_LoadsStaySpaced()
+    {
+        // one worker and slow b.test pages queued after a.test: the slots of a.test come while the worker loads b.test
+        var loads = new ConcurrentQueue<(string Url, DateTime At)>();
+        var options = ScraperTests.FastOptions();
+        options.AutoThrottle = true;
+        options.MaxConcurrency = 1;
+        options.MaxThrottleDelay = TimeSpan.FromMilliseconds(150);
+        var scraper = new Scraper(TwoHosts(loads, bLoadMs: 250), options).Route("default", _ => { });
+
+        var requests = Enumerable.Range(0, 4).Select(i => (ScrapeRequest)$"https://a.test/{i}")
+            .Concat(Enumerable.Range(0, 8).Select(i => (ScrapeRequest)$"https://b.test/{i}"));
+        var result = await scraper.RunToListAsync(requests);
+
+        Assert.AreEqual(12, result.Stats.Succeeded);
+        var a = LoadsOf(loads, "a.test");
+        var b = LoadsOf(loads, "b.test");
+        Assert.HasCount(5, a);          // 4 pages + the retry of the 429
+        // a slot that comes while the worker is busy waits for it, and the next slot counts from that load:
+        // the pages of a.test do not come in a burst when the worker gets free
+        for (var i = 1; i < a.Length; i++)
+        {
+            Assert.IsGreaterThanOrEqualTo(100, (a[i] - a[i - 1]).TotalMilliseconds, $"a.test load {i} came too soon");
+        }
+        // and a slot goes to the next free worker, not to the end of the queue behind the waiting b.test pages
+        Assert.IsLessThan(b[^1], a[3]);
     }
 
     [TestMethod]

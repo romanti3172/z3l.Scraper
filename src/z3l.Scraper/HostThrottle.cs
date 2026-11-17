@@ -7,7 +7,8 @@ namespace z3l.Scraper;
 /// Spaces the loads of hosts that are overloaded (429, 503, blocks) or ask for it (robots.txt Crawl-delay).
 /// A host that needs no spacing costs one dictionary lookup. A throttled host gets a line: requests wait in it,
 /// not in a worker, and one pump per host hands them back to the main queue one slot at a time, so workers keep
-/// loading other hosts meanwhile.
+/// loading other hosts meanwhile. A request handed back goes first in the main queue, and the line moves on only when its
+/// load starts: the next slot counts from there, so the host's loads stay spaced however long it waited for a worker.
 /// </summary>
 internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> release, ILogger logger, CancellationToken token)
 {
@@ -26,30 +27,36 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
     /// </summary>
     public bool Enter(string host, ScrapeRequest request)
     {
+        HostState? state;
+        bool load, pump;
         lock (_lock)
         {
-            if (request.HasThrottleSlot)
-            {
-                request.HasThrottleSlot = false;
-                return true;
-            }
-            if (!_hosts.TryGetValue(host, out var state)) return true;
+            var hasSlot = request.HasThrottleSlot;
+            request.HasThrottleSlot = false;
+            if (!_hosts.TryGetValue(host, out state)) return true;
 
             var now = Stopwatch.GetTimestamp();
-            if (state.Line.Count == 0 && state.NextSlot <= now)
+            if (hasSlot)
+            {
+                // the slot is taken now, however long the request waited for a worker: the next load is a delay after this one
+                if (ReferenceEquals(state.Released, request)) state.Released = null;
+                state.NextSlot = Math.Max(state.NextSlot, now + Ticks(state.Delay));
+                load = true;
+            }
+            else if (state.Line.Count == 0 && state.Released == null && state.NextSlot <= now)
             {
                 state.NextSlot = now + Ticks(state.Delay);
                 return true;
             }
-
-            state.Line.Enqueue(request);
-            if (!state.Pumping)
+            else
             {
-                state.Pumping = true;
-                _ = PumpAsync(host, state);
+                state.Line.Enqueue(request);
+                load = false;
             }
-            return false;
+            pump = StartPump(state);
         }
+        if (pump) _ = PumpAsync(host, state);
+        return load;
     }
 
     /// <summary>The host answered 429 / 503 or blocked: double its delay and pause it (as long as Retry-After asks, if longer).</summary>
@@ -80,7 +87,7 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
 
             var next = state.Delay * 0.9;
             state.Delay = next < state.BaseDelay + MinDelay ? state.BaseDelay : next;
-            if (state.Delay == TimeSpan.Zero && state.Line.Count == 0 && !state.Pumping && state.NextSlot <= Stopwatch.GetTimestamp())
+            if (state.Delay == TimeSpan.Zero && state.Line.Count == 0 && !state.Pumping && state.Released == null && state.NextSlot <= Stopwatch.GetTimestamp())
             {
                 _hosts.Remove(host);    // back to normal: no bookkeeping for this host any more
             }
@@ -107,6 +114,15 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
         lock (_lock) return _hosts.TryGetValue(host, out var state) ? state.Delay : TimeSpan.Zero;
     }
 
+    /// <summary>Under the lock: true when the host's line has requests and nobody moves it (no pump, no request out with a slot).</summary>
+    private static bool StartPump(HostState state)
+    {
+        if (state.Pumping || state.Released != null || state.Line.Count == 0) return false;
+        state.Pumping = true;
+        return true;
+    }
+
+    /// <summary>Waits for the host's next slot and hands the first request of its line back to the main queue.</summary>
     private async Task PumpAsync(string host, HostState state)
     {
         try
@@ -114,7 +130,7 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
             while (true)
             {
                 ScrapeRequest? next = null;
-                TimeSpan wait;
+                TimeSpan wait = default;
                 lock (_lock)
                 {
                     if (state.Line.Count == 0)
@@ -125,10 +141,11 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
                     var now = Stopwatch.GetTimestamp();
                     if (state.NextSlot <= now)
                     {
+                        // one request out at a time: when its load starts, Enter starts the pump again
                         next = state.Line.Dequeue();
                         next.HasThrottleSlot = true;
-                        state.NextSlot = now + Ticks(state.Delay);
-                        wait = TimeSpan.Zero;
+                        state.Released = next;
+                        state.Pumping = false;
                     }
                     else
                     {
@@ -136,8 +153,12 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
                     }
                 }
 
-                if (next != null) release(next);
-                else await Task.Delay(wait, token).ConfigureAwait(false);
+                if (next != null)
+                {
+                    release(next);
+                    return;
+                }
+                await Task.Delay(wait, token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -151,6 +172,7 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
             lock (_lock)
             {
                 state.Pumping = false;
+                state.Released = null;
                 stranded = [.. state.Line];
                 state.Line.Clear();
             }
@@ -182,6 +204,9 @@ internal sealed class HostThrottle(TimeSpan maxDelay, Action<ScrapeRequest> rele
         public TimeSpan LoggedDelay;
         public long NextSlot;
         public bool Pumping;
+
+        /// <summary>The request the line handed its slot to, on its way to a worker; the line waits for it to enter.</summary>
+        public ScrapeRequest? Released;
         public Queue<ScrapeRequest> Line { get; } = new();
     }
 }

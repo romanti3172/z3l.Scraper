@@ -225,9 +225,11 @@ internal sealed class ScraperRun : IAsyncDisposable
     {
         var lane = _scraper.LoaderFor(request.Label) is IQueuePageLoader ? _queued : _local;
         var sequence = Interlocked.Increment(ref _sequence);
+        // a request its host's line handed a slot to goes first: the line waits for its load to start
+        var priority = request.HasThrottleSlot ? -1 : (int)request.Priority;
         lock (lane.Lock)
         {
-            lane.Requests.Enqueue(request, ((int)request.Priority, sequence));
+            lane.Requests.Enqueue(request, (priority, sequence));
         }
         Stats.ChangeQueued(1);
         lane.Available.Release();
@@ -355,7 +357,9 @@ internal sealed class ScraperRun : IAsyncDisposable
         var uri = new Uri(request.Url);
         var host = uri.Authority;
 
-        if (_robots != null)
+        // a request back from its host's line with a slot was checked on its way in, and goes straight to Enter:
+        // the line waits for it there, so nothing on the way may end it
+        if (_robots != null && !request.HasThrottleSlot)
         {
             var robots = await _robots.GetAsync(uri).ConfigureAwait(false);
             if (!robots.IsAllowed(uri, _options.RobotsUserAgent))
