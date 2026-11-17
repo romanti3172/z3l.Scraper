@@ -22,22 +22,29 @@ public enum ProxyBlockPolicy
     Remove,
 }
 
-/// <summary>A proxy: scheme (http, https, socks4, socks4a, socks5), host, port and an optional login.</summary>
+/// <summary>
+/// A proxy: scheme (http, https, socks4, socks4a, socks5), host, port and an optional login. <c>https</c> is TLS to the proxy
+/// itself; a plain http proxy that tunnels https pages with CONNECT (what proxy sellers call an "HTTPS proxy") is <c>http</c>.
+/// </summary>
 /// <param name="Scheme">http, https, socks4, socks4a or socks5.</param>
-/// <param name="Host">Host name or IP address.</param>
+/// <param name="Host">Host name or IP address; an IPv6 address without brackets.</param>
 /// <param name="Port">Port.</param>
 /// <param name="UserName">Login, if the proxy needs one.</param>
 /// <param name="Password">Password, if the proxy needs one; never shown by <see cref="ToString"/>.</param>
 public sealed partial record ProxyAddress(string Scheme, string Host, int Port, string? UserName = null, string? Password = null)
 {
     /// <summary>The proxy URI without the login.</summary>
-    public Uri Uri => new($"{Scheme}://{Host}:{Port.ToString(CultureInfo.InvariantCulture)}");
+    public Uri Uri => new($"{Scheme}://{Authority}");
 
     /// <summary>Scheme, login and address; the password is never shown.</summary>
-    public override string ToString() => UserName == null ? $"{Scheme}://{Host}:{Port}" : $"{Scheme}://{UserName}@{Host}:{Port}";
+    public override string ToString() => UserName == null ? $"{Scheme}://{Authority}" : $"{Scheme}://{UserName}@{Authority}";
 
     /// <summary>Identity of the proxy, login included (two logins on one proxy are two proxies).</summary>
-    internal string Key =>$"{Scheme}://{UserName}:{Password}@{Host}:{Port}";
+    internal string Key => $"{Scheme}://{UserName}:{Password}@{Authority}";
+
+    /// <summary>host:port, an IPv6 address in brackets.</summary>
+    private string Authority =>
+        $"{(Host.Contains(':') && !Host.StartsWith('[') ? $"[{Host}]" : Host)}:{Port.ToString(CultureInfo.InvariantCulture)}";
 
     internal WebProxy ToWebProxy() => new(Uri)
     {
@@ -45,35 +52,27 @@ public sealed partial record ProxyAddress(string Scheme, string Host, int Port, 
     };
 
     /// <summary>
-    /// Reads a proxy line: <c>host:port</c>, <c>host:port:user:password</c>, <c>user:password@host:port</c> or
-    /// <c>scheme://[user:password@]host:port</c>. Without a scheme the proxy is http. Text after '#' is a comment.
+    /// Reads a proxy line: <c>host:port</c>, <c>host:port:user:password</c> or <c>user:password@host:port</c>, with or without
+    /// <c>scheme://</c> in front. Without a scheme the proxy is http; <c>socks5h</c> is read as socks5, which lets the proxy resolve
+    /// names as well. An IPv6 address goes in brackets: <c>[2001:db8::1]:8080</c>. A login may hold any character; before '@' it may
+    /// also be URL-encoded (<c>%40</c> for '@'). A '#' at the start of the line or after a space starts a comment, so a '#' in a
+    /// password stays.
     /// </summary>
     public static bool TryParse(string? line, [NotNullWhen(true)] out ProxyAddress? proxy)
     {
         proxy = null;
         if (string.IsNullOrWhiteSpace(line)) return false;
-        var value = line;
-        var comment = value.IndexOf('#');
-        if (comment >= 0) value = value[..comment];
-        value = value.Trim();
+        var value = WithoutComment(line).Trim();
         if (value.Length == 0) return false;
 
-        if (!value.Contains("://", StringComparison.Ordinal))
-        {
-            if (!value.Contains('@') && value.Count(c => c == ':') >= 3)
-            {
-                // host:port:user:password (the password may hold ':')
-                var parts = value.Split(':', 4);
-                value = $"{Uri.EscapeDataString(parts[2])}:{Uri.EscapeDataString(parts[3])}@{parts[0]}:{parts[1]}";
-            }
-            value = "http://" + value;
-        }
-
-        if (!ExplicitPort().IsMatch(value)) return false;     // "1.2.3.4" alone is a mistake, not port 80
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || string.IsNullOrEmpty(uri.Host) || uri.Port is < 1 or > 65535) return false;
-
-        var scheme = uri.Scheme.ToLowerInvariant();
+        var schemeEnd = value.IndexOf("://", StringComparison.Ordinal);
+        var scheme = schemeEnd < 0 ? "http" : value[..schemeEnd].ToLowerInvariant();
+        if (scheme == "socks5h") scheme = "socks5";         // .NET's socks5 already sends the name for the proxy to resolve
         if (scheme is not ("http" or "https" or "socks4" or "socks4a" or "socks5")) return false;
+
+        var text = $"{scheme}://{EncodeLogin(schemeEnd < 0 ? value : value[(schemeEnd + 3)..])}";
+        if (!ExplicitPort().IsMatch(text)) return false;     // "1.2.3.4" alone is a mistake, not port 80
+        if (!Uri.TryCreate(text, UriKind.Absolute, out var uri) || string.IsNullOrEmpty(uri.Host) || uri.Port is < 1 or > 65535) return false;
 
         string? user = null, password = null;
         if (uri.UserInfo.Length > 0)
@@ -82,12 +81,57 @@ public sealed partial record ProxyAddress(string Scheme, string Host, int Port, 
             user = Uri.UnescapeDataString(colon < 0 ? uri.UserInfo : uri.UserInfo[..colon]);
             password = colon < 0 ? null : Uri.UnescapeDataString(uri.UserInfo[(colon + 1)..]);
         }
-        proxy = new ProxyAddress(scheme, uri.Host, uri.Port, user, password);
+        var host = uri.HostNameType == UriHostNameType.IPv6 ? uri.Host[1..^1] : uri.Host;
+        proxy = new ProxyAddress(scheme, host, uri.Port, user, password);
         return true;
     }
 
+    /// <summary>The line before its comment, which starts with a '#' at the start of the line or after a space or a tab.</summary>
+    private static string WithoutComment(string line)
+    {
+        for (var i = line.IndexOf('#'); i >= 0; i = line.IndexOf('#', i + 1))
+        {
+            if (i == 0 || char.IsWhiteSpace(line[i - 1])) return line[..i];
+        }
+        return line;
+    }
+
+    /// <summary>
+    /// The address as <c>[user:password@]host:port</c> with the login URL-encoded: <c>host:port:user:password</c> is turned around
+    /// (its login is taken as it is), a login before '@' is encoded where it holds '@', '#', '/'... as they are.
+    /// </summary>
+    private static string EncodeLogin(string address)
+    {
+        var at = address.LastIndexOf('@');
+        if (at >= 0 && HostAndPort().IsMatch(address[(at + 1)..]))
+        {
+            var login = address[..at];
+            var colon = login.IndexOf(':');
+            var encoded = colon < 0 ? Reencode(login) : $"{Reencode(login[..colon])}:{Reencode(login[(colon + 1)..])}";
+            return $"{encoded}@{address[(at + 1)..]}";
+        }
+
+        var match = HostPortLogin().Match(address);
+        return match.Success
+            ? $"{Uri.EscapeDataString(match.Groups["user"].Value)}:{Uri.EscapeDataString(match.Groups["password"].Value)}@{match.Groups["host"].Value}:{match.Groups["port"].Value}"
+            : address;
+
+        static string Reencode(string part) => Uri.EscapeDataString(Uri.UnescapeDataString(part));
+    }
+
+    /// <summary>A host name, an IPv4 address or an IPv6 address in brackets.</summary>
+    private const string HostPattern = @"(?:\[[0-9a-fA-F:.]+\]|[^@/:\[\]]+)";
+
+    /// <summary>host:port.</summary>
+    [GeneratedRegex($@"^{HostPattern}:\d+/?$")]
+    private static partial Regex HostAndPort();
+
+    /// <summary>host:port:user:password; the password may hold ':'.</summary>
+    [GeneratedRegex($@"^(?<host>{HostPattern}):(?<port>\d+):(?<user>[^:]+):(?<password>.*)$")]
+    private static partial Regex HostPortLogin();
+
     /// <summary>scheme://[userinfo@]host:port with the port written out.</summary>
-    [GeneratedRegex(@"^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/]*@)?[^@/:]+:\d+/?$")]
+    [GeneratedRegex($@"^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/]*@)?{HostPattern}:\d+/?$")]
     private static partial Regex ExplicitPort();
 }
 

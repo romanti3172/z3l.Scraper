@@ -32,8 +32,8 @@ public sealed class HttpPageLoaderOptions
 
     /// <summary>
     /// Proxies to rotate: each load takes the next one that may load from the site, a blocked answer rests the proxy for that
-    /// site (<see cref="ProxyList.BlockPolicy"/>), failures rest it for all sites. http, https, socks4, socks4a and socks5 proxies,
-    /// with or without a login. Every proxy has its own connections and cookies.
+    /// site (<see cref="ProxyList.BlockPolicy"/>), failures rest it for all sites. http, https (TLS to the proxy), socks4, socks4a and
+    /// socks5 proxies, with or without a login (<see cref="ProxyAddress.TryParse"/>). Every proxy has its own connections and cookies.
     /// </summary>
     public ProxyList? Proxies { get; set; }
 

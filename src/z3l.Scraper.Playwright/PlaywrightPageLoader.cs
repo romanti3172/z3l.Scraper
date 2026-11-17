@@ -308,7 +308,7 @@ public sealed class PlaywrightPageLoader : IBlockAwarePageLoader, IAsyncDisposab
         {
             options.Proxy = new Proxy
             {
-                Server = $"{key.Scheme}://{key.Host}:{key.Port}",
+                Server = $"{key.Scheme}://{key.Uri.Host}:{key.Port}",     // Uri.Host: an IPv6 address in brackets
                 Username = key.UserName,
                 Password = key.Password,
             };
