@@ -246,6 +246,18 @@ var api = new HttpClient { DefaultRequestHeaders = { { "X-Api-Key", key } } };
 var proxies = await ProxyList.FromUrlAsync(new Uri("https://proxies.example/list"), refreshInterval: TimeSpan.FromMinutes(5), httpClient: api);
 ```
 
+An API that wants a POST, a key in the body or answers in its own format goes through a delegate that returns the lines;
+it is called again the same way (`UserAgentList.FromSourceAsync` is the same for user agents):
+
+```csharp
+var proxies = await ProxyList.FromSourceAsync(async token =>
+{
+    using var answer = await api.PostAsJsonAsync("https://proxies.example/v2/proxies", new { country = "pl" }, token);
+    var items = await answer.EnsureSuccessStatusCode().Content.ReadFromJsonAsync<ProxyItem[]>(token);
+    return items!.Select(x => $"socks5://{x.Login}:{x.Password}@{x.Host}:{x.Port}");
+}, name: "proxies API");
+```
+
 ### User agents
 
 ```csharp
@@ -262,11 +274,17 @@ takes the next one. A `User-Agent` in `DefaultHeaders` or in the request still w
 
 ## Throttling
 
-A host that answers 429 or 503, or whose responses are blocked (also when a handler throws
+`AutoThrottle = true` turns on slowing a host down; it is off by default. It is for scraping from one address, where a 429,
+a 503 or a block means the site is loaded too hard. With rotating proxies a block is about the proxy (the proxy list rests
+it), and remote loaders set their own pace: there slowing the whole host only slows the scraping. Without it a 429 or 503
+is retried after the retry delay, or as long as its `Retry-After` asks (up to `MaxRetryDelay`).
+
+When it is on, a host that answers 429 or 503, or whose responses are blocked (also when a handler throws
 `RetryRequestException(..., blocked: true)`), is slowed down as a whole: its requests wait in a line and load one at a time,
 1 s apart at first, twice as long after each next such answer (up to `MaxThrottleDelay`, 1 min), and the delay shrinks
 again by 10 % with each good page. A `Retry-After` pauses the host as long as it asks. Requests to other hosts keep
-going at full speed meanwhile: the line holds requests, not workers. `AutoThrottle = false` turns it off.
+going at full speed meanwhile: the line holds requests, not workers. robots.txt `Crawl-delay` (with `RespectRobotsTxt`)
+spaces a host the same way whatever `AutoThrottle` is.
 
 ## Sitemaps and robots.txt
 
@@ -335,7 +353,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
 | `RequestTimeout` | 2 min | a slower load is cancelled and retried |
 | `MaxRunDuration` | none | stop and return what was scraped |
-| `AutoThrottle`, `MaxThrottleDelay` | on, 1 min | slow down a host that answers 429 / 503 or blocks |
+| `AutoThrottle`, `MaxThrottleDelay` | off, 1 min | slow down a host that answers 429 / 503 or blocks (scraping from one address) |
 | `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
 | `StatePath`, `StateSaveInterval`, `StateJson` | none, 30 s, none | save the run and continue it after a crash |
 | `RetryOnHandlerError` | false | retry when a handler throws |
@@ -408,6 +426,23 @@ rotate proxies with `ProxyList` too: `AcquireAsync(host)` gives the next proxy t
 
 [z3l.Scraper.Playwright](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
 browser context per proxy.
+
+Pages of some labels can go to another loader: for example pages through remote browser workers and files with a local
+`HttpPageLoader`, or categories without proxies. Each loader keeps its own way: a local one works with `MaxConcurrency`
+loads and `RequestTimeout`, a queue loader (below) gets every request at once.
+
+```csharp
+var scraper = new Scraper(browserFarm, options)
+    .UseLoader(http, PageType.File)
+    .Route(...);
+```
+
+A loader that hands pages to a queue of remote workers implements `IQueuePageLoader`. The scraper then sends every
+request as soon as it is accepted (the queue can be of any length), `MaxConcurrency` limits only the handlers that run at
+once, and `RequestTimeout` does not apply: the loader finds lost loads itself. When more than `MaxLoadedNotHandled` (100)
+loaded pages wait for a handler, the scraper sets the loader's `Paused`, and the answers wait in the queue instead of the
+memory. [z3l.Scraper.RabbitMQ](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.RabbitMQ/README.md)
+is such a loader on RabbitMQ, with the workers for it.
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,

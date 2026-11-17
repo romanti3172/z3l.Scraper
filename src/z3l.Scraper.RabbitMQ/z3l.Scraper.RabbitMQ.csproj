@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- shared settings and the version: ..\Directory.Build.props -->
+
+  <PropertyGroup>
+    <RootNamespace>z3l.Scraper.RabbitMQ</RootNamespace>
+    <AssemblyName>z3l.Scraper.RabbitMQ</AssemblyName>
+    <!-- not published yet: the package name is not chosen -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>z3l.Scraper.RabbitMQ</PackageId>
+    <Description>Remote page loaders for z3l.Scraper through RabbitMQ: the scraper sends every page to a queue of loader workers (plain HTTP, a headless browser) and handles what comes back; lost loads are found with timesync markers, not with timeouts, so a queue can be of any length.</Description>
+    <PackageTags>scraper;web-scraping;crawler;rabbitmq;distributed;queue;proxy;dotnet;net9;net10</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\z3l.Scraper\z3l.Scraper.csproj" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="z3l.Scraper.RabbitMQ.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -175,6 +175,28 @@ public sealed class ProxyList
         return new ProxyList(source, lines, blockPolicy, logger);
     }
 
+    /// <summary>
+    /// Proxies read by a delegate: an API that needs a POST or a key in the body, a database... The delegate is called again every
+    /// <paramref name="refreshInterval"/> (5 minutes by default) in the background; when it throws, the old list stays. Proxies that
+    /// stay in the list keep their state.
+    /// </summary>
+    /// <param name="read">Returns the proxy lines (see <see cref="ProxyAddress.TryParse"/>); bad lines are skipped.</param>
+    /// <param name="name">Name of the source for the log, without secrets.</param>
+    /// <param name="blockPolicy">What happens to a proxy a site blocks.</param>
+    /// <param name="refreshInterval">How often the list is read again.</param>
+    /// <param name="logger">Logger for blocks, rests and refresh failures.</param>
+    /// <param name="cancellationToken">Cancels the first read.</param>
+    /// <exception cref="ArgumentException">No line of the first read is a proxy.</exception>
+    public static async Task<ProxyList> FromSourceAsync(Func<CancellationToken, Task<IEnumerable<string>>> read, string name,
+        ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, TimeSpan? refreshInterval = null, ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        var (source, lines) = await LineSource.OpenAsync(async token => [.. await read(token).ConfigureAwait(false)], name, refreshInterval, What,
+            logger ?? NullLogger.Instance, cancellationToken).ConfigureAwait(false);
+        return new ProxyList(source, lines, blockPolicy, logger);
+    }
+
     private const string What = "Proxy list";
 
     /// <summary>What happens to a proxy a site blocks.</summary>

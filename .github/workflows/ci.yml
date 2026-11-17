@@ -45,6 +45,34 @@ jobs:
           name: nuget
           path: artifacts/*
 
+  # remote loaders through a real broker; the test job above has no broker and skips them
+  rabbitmq:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: z3ltest
+          RABBITMQ_DEFAULT_PASS: z3ltest
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s --health-timeout 10s --health-retries 30
+    env:
+      Z3L_TEST_RABBITMQ: amqp://z3ltest:z3ltest@localhost:5672/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+
+      - name: Test
+        run: dotnet test tests/z3l.Scraper.RabbitMQ.Tests -c Release
+
   aot:
     runs-on: ubuntu-latest
     steps:

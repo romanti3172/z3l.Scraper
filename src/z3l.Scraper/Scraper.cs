@@ -48,8 +48,32 @@ public sealed class Scraper
         Logger = logger ?? NullLogger.Instance;
     }
 
-    /// <summary>Loads the pages.</summary>
+    /// <summary>Loads the pages (those of the labels given to <see cref="UseLoader"/> go to their own loaders).</summary>
     public IPageLoader Loader { get; }
+
+    private readonly Dictionary<string, IPageLoader> _loaders = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Loads the pages of these labels with another loader: for example pages through remote browser workers
+    /// (an <see cref="IQueuePageLoader"/>) and files with a local <see cref="HttpPageLoader"/>. A queue loader gets every request
+    /// at once, a local one works with <see cref="ScraperOptions.MaxConcurrency"/> loads and <see cref="ScraperOptions.RequestTimeout"/>
+    /// as always. The scraper does not dispose the loaders. Returns this scraper.
+    /// </summary>
+    public Scraper UseLoader(IPageLoader loader, params ScrapeLabel[] labels)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        ArgumentNullException.ThrowIfNull(labels);
+        if (labels.Length == 0) throw new ArgumentException("Name the labels of the loader", nameof(labels));
+        ThrowIfRunning();
+        foreach (var label in labels) _loaders[label.Name] = loader;
+        return this;
+    }
+
+    /// <summary>The loader of a label.</summary>
+    internal IPageLoader LoaderFor(string label) => _loaders.TryGetValue(label, out var loader) ? loader : Loader;
+
+    /// <summary>Every loader: the default one and those of <see cref="UseLoader"/>.</summary>
+    internal IEnumerable<IPageLoader> Loaders => _loaders.Values.Prepend(Loader).Distinct();
 
     /// <summary>Settings.</summary>
     public ScraperOptions Options { get; }

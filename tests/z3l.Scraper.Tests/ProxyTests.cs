@@ -629,6 +629,43 @@ public sealed class ProxyTests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Source_AnApiThatNeedsAPost_IsReadAgainEveryInterval_AFailureKeepsTheOldList()
+    {
+        var answers = new Queue<Func<IEnumerable<string>>>([
+            () => ["a.test:1", "b.test:1"],
+            () => ["c.test:1"],
+            () => throw new HttpRequestException("API down"),
+        ]);
+        var reads = 0;
+        var clock = new ManualClock();
+        var list = await ProxyList.FromSourceAsync(_ =>
+        {
+            Interlocked.Increment(ref reads);
+            return Task.FromResult(answers.Count > 1 ? answers.Dequeue()() : answers.Peek()());
+        }, "proxies API", refreshInterval: TimeSpan.FromMinutes(5));
+        list.Clock = clock;
+        Assert.AreEqual(2, list.Count);
+        Assert.AreEqual("a.test", await Next(list));          // the first call starts the refresh clock
+
+        clock.Now = clock.Now.AddMinutes(6);
+        while (await Next(list) != "c.test") await Task.Delay(20);
+        Assert.AreEqual(1, list.Count);
+
+        clock.Now = clock.Now.AddMinutes(6);
+        while (Volatile.Read(ref reads) < 3)
+        {
+            await Next(list);
+            await Task.Delay(20);
+        }
+        await Task.Delay(100);
+        Assert.AreEqual("c.test", await Next(list), "the old list stays");
+
+        var agents = await UserAgentList.FromSourceAsync(_ => Task.FromResult<IEnumerable<string>>(["UA-1", "UA-2"]), "agents API");
+        Assert.AreEqual(2, agents.Count);
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Url_FirstReadFails_Throws()
     {
         await using var server = await ListServer.StartAsync("UA-1");

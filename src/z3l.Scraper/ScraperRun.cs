@@ -22,10 +22,16 @@ internal sealed class ScraperRun : IAsyncDisposable
     private readonly ScraperOptions _options;
     private readonly CancellationTokenSource _stop;
 
-    private readonly object _queueLock = new();
-    private readonly PriorityQueue<ScrapeRequest, (int Priority, long Sequence)> _queue = new();
+    // requests of local loaders wait for one of MaxConcurrency workers; those of queue loaders are sent at once
+    private readonly Lane _local = new(), _queued = new();
     private long _sequence;
-    private readonly SemaphoreSlim _available = new(0);
+
+    private sealed class Lane
+    {
+        public readonly object Lock = new();
+        public readonly PriorityQueue<ScrapeRequest, (int Priority, long Sequence)> Requests = new();
+        public readonly SemaphoreSlim Available = new(0);
+    }
 
     // guarded by lock (_seen): what was seen, what is pending, how many were accepted (one consistent picture for the state file).
     // _unsaved holds, with a state file only, the requests not finished plus the finished ones whose items the consumer has not taken:
@@ -52,6 +58,16 @@ internal sealed class ScraperRun : IAsyncDisposable
 
     private readonly Channel<Emitted> _items;
 
+    // queue loaders: every request is sent at once, MaxConcurrency handlers take the pages, and the loaders are paused
+    // while more than MaxLoadedNotHandled pages wait for a handler
+    private readonly IQueuePageLoader[] _queueLoaders;
+    private readonly bool _hasLocalLoader;
+    private readonly SemaphoreSlim? _handlerSlots;
+    private readonly ConcurrentDictionary<Task, byte> _inFlight = new();
+    private readonly object _pauseLock = new();
+    private int _waitingForHandler;
+    private bool _loaderPaused;
+
     public ScraperRun(Scraper scraper, CancellationToken cancellationToken)
     {
         _scraper = scraper;
@@ -73,6 +89,9 @@ internal sealed class ScraperRun : IAsyncDisposable
         }
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath) ? null : _options.StatePath;
         if (_statePath != null) _codec = new StateDataCodec(scraper.FindRoute, _options.StateJson);
+        _queueLoaders = [.. scraper.Loaders.OfType<IQueuePageLoader>()];
+        _hasLocalLoader = scraper.Loaders.Any(x => x is not IQueuePageLoader);
+        if (_queueLoaders.Length > 0) _handlerSlots = new SemaphoreSlim(_options.MaxConcurrency, _options.MaxConcurrency);
     }
 
     public ScraperStats Stats { get; } = new();
@@ -102,7 +121,9 @@ internal sealed class ScraperRun : IAsyncDisposable
         try
         {
             var token = _stop.Token;
-            var workers = Enumerable.Range(0, _options.MaxConcurrency).Select(_ => Task.Run(() => WorkerAsync(token))).ToArray();
+            var workers = new List<Task>();
+            if (_hasLocalLoader) workers.AddRange(Enumerable.Range(0, _options.MaxConcurrency).Select(_ => Task.Run(() => WorkerAsync(token))));
+            if (_queueLoaders.Length > 0) workers.Add(Task.Run(() => DispatchAsync(token)));
             var progress = ProgressAsync(token);
             var saver = _statePath != null ? SaveLoopAsync(token) : Task.CompletedTask;
             var timeLimit = Task.Delay(_options.MaxRunDuration ?? Timeout.InfiniteTimeSpan, token);
@@ -116,6 +137,8 @@ internal sealed class ScraperRun : IAsyncDisposable
 
             await _stop.CancelAsync().ConfigureAwait(false);
             await IgnoreCancellation(Task.WhenAll(workers)).ConfigureAwait(false);
+            await IgnoreCancellation(Task.WhenAll(_inFlight.Keys)).ConfigureAwait(false);
+            if (_queueLoaders.Length > 0) SetLoaderPaused(false);
             await IgnoreCancellation(progress).ConfigureAwait(false);
             await IgnoreCancellation(saver).ConfigureAwait(false);
         }
@@ -200,20 +223,22 @@ internal sealed class ScraperRun : IAsyncDisposable
 
     private void Push(ScrapeRequest request)
     {
-        lock (_queueLock)
+        var lane = _scraper.LoaderFor(request.Label) is IQueuePageLoader ? _queued : _local;
+        var sequence = Interlocked.Increment(ref _sequence);
+        lock (lane.Lock)
         {
-            _queue.Enqueue(request, ((int)request.Priority, _sequence++));
+            lane.Requests.Enqueue(request, ((int)request.Priority, sequence));
         }
         Stats.ChangeQueued(1);
-        _available.Release();
+        lane.Available.Release();
     }
 
-    private ScrapeRequest Pop()
+    private ScrapeRequest Pop(Lane lane)
     {
-        lock (_queueLock)
+        lock (lane.Lock)
         {
             Stats.ChangeQueued(-1);
-            return _queue.Dequeue();
+            return lane.Requests.Dequeue();
         }
     }
 
@@ -241,26 +266,86 @@ internal sealed class ScraperRun : IAsyncDisposable
     {
         while (true)
         {
-            await _available.WaitAsync(token).ConfigureAwait(false);
-            var request = Pop();
+            await _local.Available.WaitAsync(token).ConfigureAwait(false);
+            await ProcessOneAsync(Pop(_local), token).ConfigureAwait(false);
+        }
+    }
 
-            Stats.ChangeInProgress(1);
-            try
+    /// <summary>Queue loaders: every request is started at once, its load waits in the loader's queue.</summary>
+    private async Task DispatchAsync(CancellationToken token)
+    {
+        while (true)
+        {
+            await _queued.Available.WaitAsync(token).ConfigureAwait(false);
+            var work = ProcessOneAsync(Pop(_queued), token);
+            if (work.IsCompleted) continue;
+
+            _inFlight.TryAdd(work, 0);
+            _ = work.ContinueWith(static (task, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(task, out _),
+                _inFlight, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+    }
+
+    /// <summary>Processes a request; never throws: a request the run stops on stays unfinished.</summary>
+    private async Task ProcessOneAsync(ScrapeRequest request, CancellationToken token)
+    {
+        Stats.ChangeInProgress(1);
+        try
+        {
+            await ProcessAsync(request, token).ConfigureAwait(false);
+        }
+        catch (Exception) when (token.IsCancellationRequested)
+        {
+            // the run is stopping: whatever the request threw, it stays unfinished
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Internal error on {Url}", request.Url);
+            Fail(request, FailureReason.HandlerError, $"internal error: {ex.Message}", null, ex);
+        }
+        finally
+        {
+            Stats.ChangeInProgress(-1);
+        }
+    }
+
+    /// <summary>A queue loader's page waits for one of MaxConcurrency handler slots; too many waiting pause the loader.</summary>
+    private async Task EnterHandlerAsync(CancellationToken token)
+    {
+        ChangeWaitingForHandler(1);
+        try
+        {
+            await _handlerSlots!.WaitAsync(token).ConfigureAwait(false);
+        }
+        finally
+        {
+            ChangeWaitingForHandler(-1);
+        }
+    }
+
+    private void ChangeWaitingForHandler(int delta)
+    {
+        lock (_pauseLock)
+        {
+            _waitingForHandler += delta;
+            // paused above the limit, resumed at half of it: the loader does not flap on every page
+            if (!_loaderPaused && _waitingForHandler > _options.MaxLoadedNotHandled) SetLoaderPaused(true);
+            else if (_loaderPaused && _waitingForHandler <= _options.MaxLoadedNotHandled / 2) SetLoaderPaused(false);
+        }
+    }
+
+    private void SetLoaderPaused(bool paused)
+    {
+        lock (_pauseLock)
+        {
+            if (_loaderPaused == paused) return;
+            _loaderPaused = paused;
+            Logger.LogDebug(paused ? "{Waiting} loaded pages wait for handlers: the loader is paused" : "Handlers caught up ({Waiting} waiting): the loader goes on",
+                _waitingForHandler);
+            foreach (var loader in _queueLoaders)
             {
-                await ProcessAsync(request, token).ConfigureAwait(false);
-            }
-            catch (Exception) when (token.IsCancellationRequested)
-            {
-                return;     // the run is stopping: whatever the request threw, it stays unfinished
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, "Internal error on {Url}", request.Url);
-                Fail(request, FailureReason.HandlerError, $"internal error: {ex.Message}", null, ex);
-            }
-            finally
-            {
-                Stats.ChangeInProgress(-1);
+                try { loader.Paused = paused; }
+                catch (Exception ex) { Logger.LogError(ex, "Setting Paused of the loader threw"); }
             }
         }
     }
@@ -286,10 +371,13 @@ internal sealed class ScraperRun : IAsyncDisposable
 
         await WaitForRateSlotAsync(token).ConfigureAwait(false);
 
+        var loader = _scraper.LoaderFor(request.Label);
+        var queued = loader is IQueuePageLoader;
         request.Attempts++;
         Stats.AddLoad();
 
         PageResponse? response = null;
+        var inHandlerSlot = false;
         try
         {
             ValidationResult verdict;
@@ -297,11 +385,12 @@ internal sealed class ScraperRun : IAsyncDisposable
 
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
-                if (_options.RequestTimeout != Timeout.InfiniteTimeSpan) timeout.CancelAfter(_options.RequestTimeout);
+                // a queue loader's load may wait in its queue for any time; the loader finds lost loads itself
+                if (_options.RequestTimeout != Timeout.InfiniteTimeSpan && !queued) timeout.CancelAfter(_options.RequestTimeout);
                 try
                 {
-                    response = await _scraper.Loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
-                               ?? throw new InvalidOperationException($"{_scraper.Loader.GetType().Name}.LoadAsync returned null");
+                    response = await loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
+                               ?? throw new InvalidOperationException($"{loader.GetType().Name}.LoadAsync returned null");
                     verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
                 }
                 catch (NonRetryableException ex) when (!token.IsCancellationRequested)
@@ -312,11 +401,18 @@ internal sealed class ScraperRun : IAsyncDisposable
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
                     loadError = ex;
-                    if (ex is OperationCanceledException) ReportTimeout(request);
-                    verdict = ex is OperationCanceledException
+                    var timedOut = ex is OperationCanceledException && !queued;
+                    if (timedOut) ReportTimeout(loader, request);
+                    verdict = timedOut
                         ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
                         : ValidationResult.Retry($"load error: {ex.Message}");
                 }
+            }
+
+            if (queued)
+            {
+                await EnterHandlerAsync(token).ConfigureAwait(false);
+                inHandlerSlot = true;
             }
 
             if (_options.AutoThrottle && response != null)
@@ -334,7 +430,7 @@ internal sealed class ScraperRun : IAsyncDisposable
             switch (verdict.Outcome)
             {
                 case ValidationOutcome.Ok:
-                    var (handled, items) = await HandleAsync(request, response!, host, token).ConfigureAwait(false);
+                    var (handled, items) = await HandleAsync(loader, request, response!, host, token).ConfigureAwait(false);
                     // the handler is done with the page (its parser is disposed): the text goes back to the pool,
                     // and the page must not wait in memory for a slow consumer
                     response!.ReleaseText();
@@ -355,7 +451,7 @@ internal sealed class ScraperRun : IAsyncDisposable
                     break;
 
                 case ValidationOutcome.Blocked:
-                    ReportBlocked(request, response, verdict.Reason!);
+                    ReportBlocked(loader, request, response, verdict.Reason!);
                     RetryOrFail(request, $"blocked: {verdict.Reason}", response, null);
                     break;
 
@@ -363,7 +459,7 @@ internal sealed class ScraperRun : IAsyncDisposable
                     // an answer that is not the page (429 / 503 are the site overloaded, the throttle's business)
                     if (response != null && loadError == null && response.StatusCode is not (429 or 503))
                     {
-                        ReportBadResponse(request, response, verdict.Reason!);
+                        ReportBadResponse(loader, request, response, verdict.Reason!);
                     }
                     RetryOrFail(request, verdict.Reason!, response, loadError);
                     break;
@@ -372,18 +468,19 @@ internal sealed class ScraperRun : IAsyncDisposable
         finally
         {
             response?.ReleaseText();    // a page that is retried, failed or abandoned
+            if (inHandlerSlot) _handlerSlots!.Release();
         }
     }
 
     /// <summary>Runs the handler. Handled: its items; not handled: the request is already retried or failed.</summary>
-    private async Task<(bool Handled, List<object>? Items)> HandleAsync(ScrapeRequest request, PageResponse response, string host, CancellationToken token)
+    private async Task<(bool Handled, List<object>? Items)> HandleAsync(IPageLoader loader, ScrapeRequest request, PageResponse response, string host, CancellationToken token)
     {
         var handler = _scraper.FindRoute(request.Label)!.Handler;
         var context = new ScrapeContext(this, request, response, token);
         try
         {
             await handler(context).ConfigureAwait(false);
-            ReportGoodResponse(request, response);
+            ReportGoodResponse(loader, request, response);
             return (true, context.Complete());
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
@@ -394,12 +491,12 @@ internal sealed class ScraperRun : IAsyncDisposable
                 case RetryRequestException retry:
                     if (retry.Blocked)
                     {
-                        ReportBlocked(request, response, retry.Message);
+                        ReportBlocked(loader, request, response, retry.Message);
                         if (_options.AutoThrottle) _throttle.OnOverloaded(host, null, $"handler: {retry.Message}");
                     }
                     else
                     {
-                        ReportBadResponse(request, response, $"handler: {retry.Message}");
+                        ReportBadResponse(loader, request, response, $"handler: {retry.Message}");
                     }
                     RetryOrFail(request, $"handler asked to retry: {retry.Message}", response, retry);
                     break;
@@ -449,33 +546,33 @@ internal sealed class ScraperRun : IAsyncDisposable
         Finish();
     }
 
-    private void ReportBlocked(ScrapeRequest request, PageResponse? response, string reason)
+    private void ReportBlocked(IPageLoader loader, ScrapeRequest request, PageResponse? response, string reason)
     {
         Stats.AddBlocked();
-        if (_scraper.Loader is IBlockAwarePageLoader blockAware && response != null)
+        if (loader is IBlockAwarePageLoader blockAware && response != null)
         {
             try { blockAware.ReportBlocked(request, response, reason); }
             catch (Exception ex) { Logger.LogError(ex, "ReportBlocked threw"); }
         }
     }
 
-    private void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason)
+    private void ReportBadResponse(IPageLoader loader, ScrapeRequest request, PageResponse response, string reason)
     {
-        if (_scraper.Loader is not IBlockAwarePageLoader blockAware) return;
+        if (loader is not IBlockAwarePageLoader blockAware) return;
         try { blockAware.ReportBadResponse(request, response, reason); }
         catch (Exception ex) { Logger.LogError(ex, "ReportBadResponse threw"); }
     }
 
-    private void ReportTimeout(ScrapeRequest request)
+    private void ReportTimeout(IPageLoader loader, ScrapeRequest request)
     {
-        if (_scraper.Loader is not IBlockAwarePageLoader blockAware) return;
+        if (loader is not IBlockAwarePageLoader blockAware) return;
         try { blockAware.ReportTimeout(request); }
         catch (Exception ex) { Logger.LogError(ex, "ReportTimeout threw"); }
     }
 
-    private void ReportGoodResponse(ScrapeRequest request, PageResponse response)
+    private void ReportGoodResponse(IPageLoader loader, ScrapeRequest request, PageResponse response)
     {
-        if (_scraper.Loader is not IBlockAwarePageLoader blockAware) return;
+        if (loader is not IBlockAwarePageLoader blockAware) return;
         try { blockAware.ReportGoodResponse(request, response); }
         catch (Exception ex) { Logger.LogError(ex, "ReportGoodResponse threw"); }
     }
