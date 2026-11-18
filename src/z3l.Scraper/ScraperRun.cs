@@ -17,7 +17,7 @@ internal readonly record struct Emitted(object Item, ScrapeRequest? Request);
 /// State of one run. Every accepted request is "pending" until it is handled or failed; retries, host lines and delays keep it
 /// pending. A handler queues new pages before its own request finishes, so pending reaches zero only when all the work is done.
 /// </summary>
-internal sealed class ScraperRun : IAsyncDisposable
+internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
 {
     private readonly Scraper _scraper;
     private readonly ScraperOptions _options;
@@ -208,13 +208,7 @@ internal sealed class ScraperRun : IAsyncDisposable
             if (parent != null) return false;
             throw new ArgumentException($"A start request needs an absolute http(s) URL: \"{request.Url}\"", nameof(request));
         }
-        var route = _scraper.FindRoute(request.Label)
-                    ?? throw new InvalidOperationException($"No handler for label \"{request.Label}\": register it with Route(\"{request.Label}\", handler) or add FallbackRoute");
-        if (route.DataType != null && !route.DataType.IsInstanceOfType(request.Data))
-        {
-            throw Scraper.WrongData(request.Label, route.DataType, request.Data);     // where the mistake is, not later in the handler
-        }
-        ScrapeContext.ThrowIfPageBound(request.Data, nameof(request));
+        _scraper.RouteOf(request);       // where the mistake is, not later in the handler
         _codec?.Check(request.Label, request.Data);
 
         var depth = parent == null ? 0 : parent.Depth + 1;

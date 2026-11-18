@@ -7,13 +7,22 @@ using z3l.Scraper.Crawling;
 
 namespace z3l.Scraper;
 
+/// <summary>What a <see cref="ScrapeContext"/> works for: a run, or <see cref="Scraper.ParseAsync(ScrapeRequest, CancellationToken)"/>.</summary>
+internal interface IScrapeHost
+{
+    ILogger Logger { get; }
+
+    /// <summary>Takes a request the handler of <paramref name="parent"/> queued (its URL absolute); false when it is not taken.</summary>
+    bool Enqueue(ScrapeRequest request, ScrapeRequest? parent);
+}
+
 /// <summary>
 /// What a handler gets: the request, the loaded page, and ways to queue more pages and emit items.
 /// Valid only while the handler runs: then the page is let go, so a context kept by mistake does not keep it in memory.
 /// </summary>
 public sealed class ScrapeContext
 {
-    private readonly ScraperRun _run;
+    private readonly IScrapeHost _host;
     private readonly object _lock = new();
     private PageResponse? _response;
     private HtmlParser? _html;
@@ -21,9 +30,9 @@ public sealed class ScrapeContext
     private List<object>? _items;
     private bool _completed;
 
-    internal ScrapeContext(ScraperRun run, ScrapeRequest request, PageResponse response, CancellationToken cancellationToken)
+    internal ScrapeContext(IScrapeHost host, ScrapeRequest request, PageResponse response, CancellationToken cancellationToken)
     {
-        _run = run;
+        _host = host;
         Request = request;
         _response = response;
         CancellationToken = cancellationToken;
@@ -40,7 +49,7 @@ public sealed class ScrapeContext
     public CancellationToken CancellationToken { get; }
 
     /// <summary>Logger of the scraper.</summary>
-    public ILogger Logger => _run.Logger;
+    public ILogger Logger => _host.Logger;
 
     /// <summary>
     /// The page parsed with z3l.FastHtmlParser, made on first use; relative links resolve against the final page URL.
@@ -124,7 +133,7 @@ public sealed class ScrapeContext
         ThrowIfCompleted();
 
         if (!UrlHelper.TryResolve(Response.Url, request.Url, out var absolute)) return false;
-        return _run.Enqueue(absolute == request.Url ? request : request with { Url = absolute }, parent: Request);
+        return _host.Enqueue(absolute == request.Url ? request : request with { Url = absolute }, parent: Request);
     }
 
     /// <summary>The loaded page read as a sitemap: XML (urlset or sitemapindex), gzipped or not, or a text list of URLs.</summary>
