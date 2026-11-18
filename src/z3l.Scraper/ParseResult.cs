@@ -14,9 +14,10 @@ namespace z3l.Scraper;
 /// </param>
 /// <param name="Items">What the handler emitted, also before it threw (a run drops those).</param>
 /// <param name="Found">
-/// The pages the handler queued, in its order, with their labels and data, as a run would take them: duplicates and URLs
-/// that are not http(s) are left out (<c>Enqueue</c> returned false for them). None of them was loaded. The limits of a run
-/// (<see cref="ScraperOptions.MaxDepth"/>, <see cref="ScraperOptions.MaxRequests"/>) do not apply.
+/// The pages the handler queued, in its order, with their labels and data, as a run would take them: duplicates, URLs that are
+/// not http(s) and links out of the crawl scope (<see cref="ScraperOptions.AllowedHosts"/>, <see cref="ScraperOptions.UrlFilter"/>) are
+/// left out (<c>Enqueue</c> returned false for them), and the URLs are without <see cref="ScraperOptions.IgnoredQueryParameters"/>. None
+/// of them was loaded. The limits of a run (<see cref="ScraperOptions.MaxDepth"/>, <see cref="ScraperOptions.MaxRequests"/>) do not apply.
 /// </param>
 /// <param name="Exception">
 /// What the handler threw, <see cref="RetryRequestException"/> and <see cref="NonRetryableException"/> included; null when it

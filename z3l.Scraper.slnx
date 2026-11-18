@@ -6,6 +6,8 @@
     <Project Path="src/z3l.Scraper.Playwright/z3l.Scraper.Playwright.csproj" />
     <Project Path="src/z3l.Scraper.RabbitMQ/z3l.Scraper.RabbitMQ.csproj" />
     <Project Path="src/z3l.Scraper.Loaders.ScrapingBee/z3l.Scraper.Loaders.ScrapingBee.csproj" />
+    <Project Path="src/z3l.Scraper.Loaders.ScraperApi/z3l.Scraper.Loaders.ScraperApi.csproj" />
+    <Project Path="src/z3l.Scraper.Loaders.ZenRows/z3l.Scraper.Loaders.ZenRows.csproj" />
     <Project Path="src/z3l.Scraper.Loaders.ZyteApi/z3l.Scraper.Loaders.ZyteApi.csproj" />
     <Project Path="src/z3l.Scraper/z3l.Scraper.csproj" />
   </Folder>
@@ -13,6 +15,8 @@
     <Project Path="tests/z3l.Scraper.Playwright.Tests/z3l.Scraper.Playwright.Tests.csproj" />
     <Project Path="tests/z3l.Scraper.RabbitMQ.Tests/z3l.Scraper.RabbitMQ.Tests.csproj" />
     <Project Path="tests/z3l.Scraper.Loaders.ScrapingBee.Tests/z3l.Scraper.Loaders.ScrapingBee.Tests.csproj" />
+    <Project Path="tests/z3l.Scraper.Loaders.ScraperApi.Tests/z3l.Scraper.Loaders.ScraperApi.Tests.csproj" />
+    <Project Path="tests/z3l.Scraper.Loaders.ZenRows.Tests/z3l.Scraper.Loaders.ZenRows.Tests.csproj" />
     <Project Path="tests/z3l.Scraper.Loaders.ZyteApi.Tests/z3l.Scraper.Loaders.ZyteApi.Tests.csproj" />
     <Project Path="tests/z3l.Scraper.Tests/z3l.Scraper.Tests.csproj" />
   </Folder>

@@ -114,8 +114,8 @@ public sealed record ReasonCount(ReasonKind Kind, string Reason, string Label, s
 public sealed class ScraperStats
 {
     private readonly Stopwatch _clock = new();
-    private long _enqueued, _duplicates, _skipped, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked, _rateLimited,
-        _items, _inProgress, _queued;
+    private long _enqueued, _duplicates, _skipped, _outOfScope, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked,
+        _rateLimited, _items, _inProgress, _queued;
 
     /// <summary>
     /// Unique requests accepted. A request with a bad URL from <see cref="Scraper.RequestsNeeded"/> is counted here and in
@@ -124,8 +124,13 @@ public sealed class ScraperStats
     public long Enqueued => Interlocked.Read(ref _enqueued);
     /// <summary>Requests skipped as duplicates.</summary>
     public long Duplicates => Interlocked.Read(ref _duplicates);
-    /// <summary>Requests skipped because <see cref="ScraperOptions.MaxRequests"/> was reached.</summary>
+    /// <summary>Requests skipped because <see cref="ScraperOptions.MaxRequests"/> was reached or they were deeper than <see cref="ScraperOptions.MaxDepth"/>.</summary>
     public long SkippedByLimit => Interlocked.Read(ref _skipped);
+    /// <summary>
+    /// Links found on pages that were skipped as out of the crawl scope (<see cref="ScraperOptions.AllowedHosts"/>,
+    /// <see cref="ScraperOptions.UrlFilter"/>), and saved ones a continued run dropped for it.
+    /// </summary>
+    public long OutOfScope => Interlocked.Read(ref _outOfScope);
     /// <summary>Unfinished requests taken over from the state file of an earlier run (<see cref="ScraperOptions.StatePath"/>).</summary>
     public long Restored => Interlocked.Read(ref _restored);
     /// <summary>Load attempts, retries included, and the loads a scraping service refused for its limits (<see cref="RateLimited"/>).</summary>
@@ -155,7 +160,10 @@ public sealed class ScraperStats
     public long Items => Interlocked.Read(ref _items);
     /// <summary>Requests being loaded or handled now.</summary>
     public long InProgress => Interlocked.Read(ref _inProgress);
-    /// <summary>Requests waiting in the queue (retries waiting for their delay are not counted).</summary>
+    /// <summary>
+    /// Requests waiting in the queue or in the line of their host (<see cref="ScraperOptions.MaxConcurrencyPerHost"/>,
+    /// <see cref="ScraperOptions.HostDelay"/>, throttling); retries waiting for their delay are not counted.
+    /// </summary>
     public long Queued => Interlocked.Read(ref _queued);
     /// <summary>Requests not finished: queued, in progress or waiting for a retry.</summary>
     public long Pending => Enqueued - Succeeded - Failed;
@@ -225,6 +233,7 @@ public sealed class ScraperStats
     internal void AddEnqueued() => Interlocked.Increment(ref _enqueued);
     internal void AddDuplicate() => Interlocked.Increment(ref _duplicates);
     internal void AddSkippedByLimit() => Interlocked.Increment(ref _skipped);
+    internal void AddOutOfScope() => Interlocked.Increment(ref _outOfScope);
     internal void AddRestored() => Interlocked.Increment(ref _restored);
     internal void AddLoad() => Interlocked.Increment(ref _loads);
     internal void AddFromCache() => Interlocked.Increment(ref _fromCache);
@@ -245,6 +254,7 @@ public sealed class ScraperStats
         var rate = elapsed.TotalMinutes > 0 ? Succeeded / elapsed.TotalMinutes : 0;
         var time = elapsed.TotalDays >= 1 ? $"{(int)elapsed.TotalDays}d {elapsed:hh\\:mm\\:ss}" : $"{elapsed:hh\\:mm\\:ss}";
         var skipped = (SkippedByLimit > 0 ? $", {SkippedByLimit} over limits" : string.Empty)
+                      + (OutOfScope > 0 ? $", {OutOfScope} out of scope" : string.Empty)
                       + (Restored > 0 ? $", {Restored} restored" : string.Empty);
         var cached = FromCache > 0 ? $", {FromCache} from cache" : string.Empty;
         var limited = RateLimited > 0 ? $", {RateLimited} rate limited" : string.Empty;

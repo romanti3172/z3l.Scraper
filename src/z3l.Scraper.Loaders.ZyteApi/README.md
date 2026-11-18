@@ -5,9 +5,10 @@ Zyte API keeps the proxies, the browsers and the ban handling; the scraper keeps
 handlers. The loader is a `ServicePageLoader`: at most `MaxConcurrency` calls go at once, no new call starts while the
 scraper's handlers are behind, and a page that comes back blocked is loaded again in a browser.
 
-**It has not met the real API yet.** The loader follows Zyte API's documentation
+**It has not met the real API yet: that needs a Zyte API key.** The loader follows Zyte API's documentation
 ([docs.zyte.com/zyte-api](https://docs.zyte.com/zyte-api/), read in November 2026), and its tests use a fake service that
-answers as the documentation says. The tests against the real API are written and wait for a key.
+answers as the documentation says. The tests against the real API are written and wait for the key; what they should answer
+is in [TODO.md](TODO.md).
 
 ## Use
 
@@ -84,14 +85,5 @@ var scraper = new Scraper(loader, new ScraperOptions { MaxConcurrency = 8 })    
 `ZyteApiLiveTests` run against the real API when `Z3L_TEST_ZYTEAPI` holds an API key; the $5 of free credit of a new
 account is plenty. Without the key they are skipped, and the other tests use the fake service.
 
-What the loader takes from the documentation, and has not seen:
-- An error is `application/problem+json` with `type`, `title`, `status` and `detail`; the loader goes by the status.
-- A page with a status other than 200 that is no ban comes in a 200, in `statusCode`.
-- 520 is a ban Zyte API could not avoid in time; 521 is a download error it calls permanent but asks to retry, as some are
-  bans.
-- `httpResponseHeaders` goes with `browserHtml` as with `httpResponseBody`, and `requestCookies` with both.
-
-Where the documentation says nothing, the loader guesses:
-- An answer without `statusCode` is a 200 of the site.
-- An HTTP request with no body to give (HEAD, or a 204 or a 304 of the site) may come without `httpResponseBody`: the page is
-  empty.
+They have not run: there is no key yet. [TODO.md](TODO.md) holds what the loader takes from the documentation or guesses
+where it says nothing, as questions for the first run with a key.
