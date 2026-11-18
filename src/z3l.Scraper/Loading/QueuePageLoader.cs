@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using z3l.Scraper.Diagnostics;
 
 namespace z3l.Scraper.Loading;
 
@@ -40,9 +41,11 @@ public sealed class RemoteLoad
 /// still, so that time does not count against a load's deadline, and <see cref="WaitWhilePausedAsync"/> holds what should wait.
 /// </para>
 /// </summary>
-public abstract class QueuePageLoader : IQueuePageLoader, IAsyncDisposable
+public abstract class QueuePageLoader : IQueuePageLoader, IAsyncDisposable, IPublishesMetrics
 {
     private readonly ConcurrentDictionary<Guid, RemoteLoad> _pending = new();
+    private LoaderInstruments? _metrics;        // null until a run with PublishMetrics uses the loader
+    private KeyValuePair<string, object?> _loaderTag;
     private readonly PausableClock _clock;
     private readonly CancellationTokenSource _stop = new();
     private readonly CancellationToken _stopping;
@@ -121,6 +124,7 @@ public abstract class QueuePageLoader : IQueuePageLoader, IAsyncDisposable
         {
             await SendAsync(load, cancellationToken).ConfigureAwait(false);
             Interlocked.Increment(ref _sent);
+            Metrics?.RemoteSent.Add(1, _loaderTag);
         }
         catch
         {
@@ -161,9 +165,11 @@ public abstract class QueuePageLoader : IQueuePageLoader, IAsyncDisposable
         if (!TryRemove(id, out var load))
         {
             Interlocked.Increment(ref _late);
+            CountResult("late");
             return false;
         }
         Interlocked.Increment(ref _answered);
+        CountResult("answered");
         load.Result.TrySetResult(response);
         return true;
     }
@@ -178,9 +184,11 @@ public abstract class QueuePageLoader : IQueuePageLoader, IAsyncDisposable
         if (!TryRemove(id, out var load))
         {
             Interlocked.Increment(ref _late);
+            CountResult("late");
             return false;
         }
         Interlocked.Increment(ref _failed);
+        CountResult("failed");
         load.Result.TrySetException(error);
         return true;
     }
@@ -190,8 +198,34 @@ public abstract class QueuePageLoader : IQueuePageLoader, IAsyncDisposable
     {
         if (!TryRemove(id, out var load)) return false;
         Interlocked.Increment(ref _lost);
+        CountResult("lost");
         load.Result.TrySetException(new RemoteLoadException(reason));
         return true;
+    }
+
+    /// <summary>The instruments, once a run with <see cref="ScraperOptions.PublishMetrics"/> used the loader; null before.</summary>
+    private protected LoaderInstruments? Metrics => Volatile.Read(ref _metrics);
+
+    /// <summary>The tag <c>z3l.scraper.loader</c>: the type of the loader.</summary>
+    private protected KeyValuePair<string, object?> LoaderTag => _loaderTag;
+
+    /// <summary>
+    /// A run with metrics uses the loader: from now on its loads are counted (<c>z3l.scraper.remote.sent</c>,
+    /// <c>z3l.scraper.remote.results</c>) and those that wait are observed (<c>z3l.scraper.remote.pending</c>).
+    /// </summary>
+    void IPublishesMetrics.PublishMetrics()
+    {
+        if (Metrics != null) return;
+        _loaderTag = new KeyValuePair<string, object?>(ScraperTelemetry.LoaderTag, GetType().Name);
+        var instruments = ScraperTelemetry.LoaderInstruments;
+        instruments.Add(this);
+        Volatile.Write(ref _metrics, instruments);
+    }
+
+    private void CountResult(string result)
+    {
+        if (Metrics is not { } metrics) return;
+        metrics.RemoteResults.Add(1, _loaderTag, new KeyValuePair<string, object?>(ScraperTelemetry.ResultTag, result));
     }
 
     /// <summary>A load that waits for its answer.</summary>

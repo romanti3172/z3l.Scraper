@@ -90,7 +90,11 @@ public abstract class ServicePageLoader : QueuePageLoader, IBlockAwarePageLoader
     protected abstract Task<PageResponse> CallAsync(HttpClient client, ScrapeRequest request, int level, CancellationToken cancellationToken);
 
     /// <summary>Counts what a call cost, as the service tells it.</summary>
-    protected void AddCredits(double credits) => Interlocked.Add(ref _creditsThousandths, (long)Math.Round(credits * 1000));
+    protected void AddCredits(double credits)
+    {
+        Interlocked.Add(ref _creditsThousandths, (long)Math.Round(credits * 1000));
+        Metrics?.Credits.Add(credits, LoaderTag);
+    }
 
     /// <summary>
     /// The <c>Retry-After</c> of the service's answer, seconds or a date, as <see cref="RemoteLoadException.RetryAfter"/> takes it; null
