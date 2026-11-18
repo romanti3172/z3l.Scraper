@@ -5,15 +5,22 @@
   <PropertyGroup>
     <RootNamespace>z3l.Scraper.Loaders.ScrapingBee</RootNamespace>
     <AssemblyName>z3l.Scraper.Loaders.ScrapingBee</AssemblyName>
-    <!-- not published yet: the package name is not chosen -->
-    <IsPackable>false</IsPackable>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <PropertyGroup Label="Package">
     <PackageId>z3l.Scraper.Loaders.ScrapingBee</PackageId>
-    <Description>A page loader for z3l.Scraper through ScrapingBee: its proxies, browsers and captcha handling, called a page at a time within the plan's limit; a page that comes back blocked is loaded again with premium or stealth proxies.</Description>
-    <PackageTags>scraper;web-scraping;crawler;scrapingbee;scraping-api;proxy;dotnet;net9;net10</PackageTags>
+    <Description>A page loader for z3l.Scraper through the ScrapingBee web scraping API: its rotating proxies and headless browsers, called a page at a time within the plan's limit of calls at once. A page that comes back blocked is loaded again with premium proxies, then the stealth pool when asked; the scraper keeps the queue, the checks, the retries and the handlers.</Description>
+    <PackageTags>scraper;web-scraping;webscraping;crawler;scrapingbee;scraping-api;web-scraping-api;headless-browser;javascript-rendering;proxy;rotating-proxies;dotnet;csharp;net9;net10</PackageTags>
+    <Title>z3l Scraper Loaders ScrapingBee</Title>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon-service.png" Pack="true" PackagePath="\icon.png" Visible="false" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\z3l.Scraper\z3l.Scraper.csproj" />
