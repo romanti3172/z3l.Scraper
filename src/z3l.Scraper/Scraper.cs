@@ -75,6 +75,41 @@ public sealed class Scraper
     /// <summary>Every loader: the default one and those of <see cref="UseLoader"/>.</summary>
     internal IEnumerable<IPageLoader> Loaders => _loaders.Values.Prepend(Loader).Distinct();
 
+    private ICachingPageLoader? _cachingPageLoader;
+    private ISnapshotPageLoader? _snapshotPageLoader;
+
+    /// <summary>
+    /// Keeps the pages the handlers took and gives them back instead of loading them again, for the labels of every loader:
+    /// <see cref="Loading.CachingPageLoader"/> keeps them in a folder, for working on handlers without loading the site each time.
+    /// Null, the default, for no cache. Set it before the run.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Set while the scraper is running.</exception>
+    public ICachingPageLoader? CachingPageLoader
+    {
+        get => _cachingPageLoader;
+        set
+        {
+            ThrowIfRunning();
+            _cachingPageLoader = value;
+        }
+    }
+
+    /// <summary>
+    /// Saves the loaded pages that were not taken (blocked, missing, broken, or those whose handler threw), for the labels of every
+    /// loader: <see cref="Loading.SnapshotPageLoader"/> saves them in a folder, to show what the site answered. Null, the default, saves
+    /// nothing. Set it before the run.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Set while the scraper is running.</exception>
+    public ISnapshotPageLoader? SnapshotPageLoader
+    {
+        get => _snapshotPageLoader;
+        set
+        {
+            ThrowIfRunning();
+            _snapshotPageLoader = value;
+        }
+    }
+
     /// <summary>Settings.</summary>
     public ScraperOptions Options { get; }
 
@@ -229,6 +264,6 @@ public sealed class Scraper
 
     private void ThrowIfRunning()
     {
-        if (Volatile.Read(ref _running) == 1) throw new InvalidOperationException("Routes cannot change while the scraper is running");
+        if (Volatile.Read(ref _running) == 1) throw new InvalidOperationException("Routes, loaders and the cache cannot change while the scraper is running");
     }
 }

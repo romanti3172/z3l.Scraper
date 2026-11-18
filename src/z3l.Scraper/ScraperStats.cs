@@ -29,7 +29,7 @@ public sealed record FailedRequest(ScrapeRequest Request, FailureReason Reason, 
 public sealed class ScraperStats
 {
     private readonly Stopwatch _clock = new();
-    private long _enqueued, _duplicates, _skipped, _restored, _loads, _succeeded, _failed, _notFound, _retries, _blocked, _items, _inProgress, _queued;
+    private long _enqueued, _duplicates, _skipped, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked, _items, _inProgress, _queued;
 
     /// <summary>Unique requests accepted.</summary>
     public long Enqueued => Interlocked.Read(ref _enqueued);
@@ -41,6 +41,11 @@ public sealed class ScraperStats
     public long Restored => Interlocked.Read(ref _restored);
     /// <summary>Load attempts, retries included.</summary>
     public long Loads => Interlocked.Read(ref _loads);
+    /// <summary>
+    /// Pages <see cref="Scraper.CachingPageLoader"/> gave instead of the loader, those that turned out not to be the page included
+    /// (their requests were loaded then). Not counted in <see cref="Loads"/>.
+    /// </summary>
+    public long FromCache => Interlocked.Read(ref _fromCache);
     /// <summary>Requests whose page was handled.</summary>
     public long Succeeded => Interlocked.Read(ref _succeeded);
     /// <summary>Requests that failed (not found included).</summary>
@@ -71,6 +76,7 @@ public sealed class ScraperStats
     internal void AddSkippedByLimit() => Interlocked.Increment(ref _skipped);
     internal void AddRestored() => Interlocked.Increment(ref _restored);
     internal void AddLoad() => Interlocked.Increment(ref _loads);
+    internal void AddFromCache() => Interlocked.Increment(ref _fromCache);
     internal void AddSucceeded() => Interlocked.Increment(ref _succeeded);
     internal void AddFailed() => Interlocked.Increment(ref _failed);
     internal void AddNotFound() => Interlocked.Increment(ref _notFound);
@@ -88,8 +94,9 @@ public sealed class ScraperStats
         var time = elapsed.TotalDays >= 1 ? $"{(int)elapsed.TotalDays}d {elapsed:hh\\:mm\\:ss}" : $"{elapsed:hh\\:mm\\:ss}";
         var skipped = (SkippedByLimit > 0 ? $", {SkippedByLimit} over limits" : string.Empty)
                       + (Restored > 0 ? $", {Restored} restored" : string.Empty);
+        var cached = FromCache > 0 ? $", {FromCache} from cache" : string.Empty;
         return $"{Succeeded}/{Enqueued} done, {Failed} failed ({NotFound} not found), {Pending} pending " +
-               $"({Queued} queued, {InProgress} in progress), {Loads} loads, {Retries} retries, {Blocked} blocked, " +
+               $"({Queued} queued, {InProgress} in progress), {Loads} loads{cached}, {Retries} retries, {Blocked} blocked, " +
                $"{Items} items, {Duplicates} duplicates{skipped}, {time}, {rate:F1} pages/min";
     }
 }

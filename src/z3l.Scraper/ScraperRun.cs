@@ -52,6 +52,8 @@ internal sealed class ScraperRun : IAsyncDisposable
 
     private readonly HostThrottle _throttle;
     private readonly RobotsCache? _robots;
+    private readonly ICachingPageLoader? _cache;
+    private readonly ISnapshotPageLoader? _snapshots;
     private readonly string? _statePath;
     private readonly StateDataCodec? _codec;
     private readonly SemaphoreSlim _saveLock = new(1, 1);
@@ -87,6 +89,8 @@ internal sealed class ScraperRun : IAsyncDisposable
         {
             _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
         }
+        _cache = scraper.CachingPageLoader;
+        _snapshots = scraper.SnapshotPageLoader;
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath) ? null : _options.StatePath;
         if (_statePath != null) _codec = new StateDataCodec(scraper.FindRoute, _options.StateJson);
         _queueLoaders = [.. scraper.Loaders.OfType<IQueuePageLoader>()];
@@ -186,7 +190,7 @@ internal sealed class ScraperRun : IAsyncDisposable
 
         var depth = parent == null ? 0 : parent.Depth + 1;
         // own copy: the caller may reuse its instance
-        request = request with { Url = url, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false };
+        request = request with { Url = url, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
         var key = request.SkipDuplicateCheck ? null : request.GetUniqueKey();
 
         lock (_seen)
@@ -370,25 +374,48 @@ internal sealed class ScraperRun : IAsyncDisposable
             if (robots.CrawlDelay(_options.RobotsUserAgent) is { } crawlDelay) _throttle.SetBaseDelay(host, crawlDelay);
         }
 
-        // a throttled host: the request waits in the host's line and comes back through the queue when its slot comes
-        if (!_throttle.Enter(host, request)) return;
+        // a kept page needs no load: it skips the host's line and the rate limit. The cache is asked once per request (a request back
+        // from its host's line asked on its way in), so the retries of a request go to its loader
+        PageResponse? cached = null;
+        if (_cache != null && !request.SkipCache && !request.HasThrottleSlot)
+        {
+            request.SkipCache = true;
+            cached = await LoadFromCacheAsync(request, token).ConfigureAwait(false);
+        }
+        var fromCache = cached != null;
 
-        await WaitForRateSlotAsync(token).ConfigureAwait(false);
+        // a throttled host: the request waits in the host's line and comes back through the queue when its slot comes
+        if (!fromCache && !_throttle.Enter(host, request)) return;
+
+        if (!fromCache) await WaitForRateSlotAsync(token).ConfigureAwait(false);
 
         var loader = _scraper.LoaderFor(request.Label);
         var queued = loader is IQueuePageLoader;
         request.Attempts++;
-        Stats.AddLoad();
+        if (fromCache) Stats.AddFromCache();
+        else Stats.AddLoad();
 
-        PageResponse? response = null;
+        PageResponse? response = cached;
         var inHandlerSlot = false;
         try
         {
             ValidationResult verdict;
             Exception? loadError = null;
 
-            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
+            if (fromCache)
             {
+                verdict = ResponseValidator.Validate(request, response!, GetRules(request.Label));
+                if (verdict.Outcome != ValidationOutcome.Ok)
+                {
+                    // the kept page is not the page any more (the rules changed since it was kept): it was no attempt
+                    await SnapshotAsync(request, response, KindOf(verdict.Outcome), verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
+                    await LoadAgainAsync(request, $"the kept page failed the checks: {verdict.Reason}", token).ConfigureAwait(false);
+                    return;
+                }
+            }
+            else
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
                 // a queue loader's load may wait in its queue for any time; the loader finds lost loads itself
                 if (_options.RequestTimeout != Timeout.InfiniteTimeSpan && !queued) timeout.CancelAfter(_options.RequestTimeout);
                 try
@@ -419,7 +446,8 @@ internal sealed class ScraperRun : IAsyncDisposable
                 inHandlerSlot = true;
             }
 
-            if (_options.AutoThrottle && response != null)
+            // a kept page is no answer of the host: it does not change the host's pace
+            if (_options.AutoThrottle && response != null && !fromCache)
             {
                 if (verdict.Outcome == ValidationOutcome.Blocked || response.StatusCode is 429 or 503)
                 {
@@ -434,7 +462,9 @@ internal sealed class ScraperRun : IAsyncDisposable
             switch (verdict.Outcome)
             {
                 case ValidationOutcome.Ok:
-                    var (handled, items) = await HandleAsync(loader, request, response!, host, token).ConfigureAwait(false);
+                    var (handled, items) = await HandleAsync(loader, request, response!, host, fromCache, token).ConfigureAwait(false);
+                    // a page its handler took is kept while it is still here (a page from the cache is kept already)
+                    if (handled && !fromCache) await StoreInCacheAsync(request, response!, token).ConfigureAwait(false);
                     // the handler is done with the page (its parser is disposed): the text goes back to the pool,
                     // and the page must not wait in memory for a slow consumer
                     response!.ReleaseText();
@@ -443,6 +473,7 @@ internal sealed class ScraperRun : IAsyncDisposable
                     break;
 
                 case ValidationOutcome.NotFound:
+                    await SnapshotAsync(request, response, SnapshotKind.NotFound, verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
                     request.NotFoundCount++;
                     if (request.NotFoundCount <= _options.NotFoundRetries)
                     {
@@ -455,11 +486,14 @@ internal sealed class ScraperRun : IAsyncDisposable
                     break;
 
                 case ValidationOutcome.Blocked:
+                    await SnapshotAsync(request, response, SnapshotKind.Blocked, verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
                     ReportBlocked(loader, request, response, verdict.Reason!);
                     RetryOrFail(request, $"blocked: {verdict.Reason}", response, null);
                     break;
 
                 default:
+                    // a load that brought no page has nothing to show
+                    await SnapshotAsync(request, response, SnapshotKind.Retry, verdict.Reason!, loadError, fromCache, token).ConfigureAwait(false);
                     // an answer that is not the page (429 / 503 are the site overloaded, the throttle's business)
                     if (response != null && loadError == null && response.StatusCode is not (429 or 503))
                     {
@@ -477,14 +511,15 @@ internal sealed class ScraperRun : IAsyncDisposable
     }
 
     /// <summary>Runs the handler. Handled: its items; not handled: the request is already retried or failed.</summary>
-    private async Task<(bool Handled, List<object>? Items)> HandleAsync(IPageLoader loader, ScrapeRequest request, PageResponse response, string host, CancellationToken token)
+    private async Task<(bool Handled, List<object>? Items)> HandleAsync(IPageLoader loader, ScrapeRequest request, PageResponse response, string host,
+        bool fromCache, CancellationToken token)
     {
         var handler = _scraper.FindRoute(request.Label)!.Handler;
         var context = new ScrapeContext(this, request, response, token);
         try
         {
             await handler(context).ConfigureAwait(false);
-            ReportGoodResponse(loader, request, response);
+            if (!fromCache) ReportGoodResponse(loader, request, response);     // the loader hears about its own pages only
             return (true, context.Complete());
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
@@ -493,6 +528,14 @@ internal sealed class ScraperRun : IAsyncDisposable
             switch (ex)
             {
                 case RetryRequestException retry:
+                    await SnapshotAsync(request, response, retry.Blocked ? SnapshotKind.Blocked : SnapshotKind.Retry, $"handler: {retry.Message}", retry,
+                        fromCache, token).ConfigureAwait(false);
+                    if (fromCache)
+                    {
+                        // the handler does not want the kept page: it was no attempt
+                        await LoadAgainAsync(request, $"the handler asked to retry the kept page: {retry.Message}", token).ConfigureAwait(false);
+                        break;
+                    }
                     if (retry.Blocked)
                     {
                         ReportBlocked(loader, request, response, retry.Message);
@@ -505,9 +548,11 @@ internal sealed class ScraperRun : IAsyncDisposable
                     RetryOrFail(request, $"handler asked to retry: {retry.Message}", response, retry);
                     break;
                 case NonRetryableException nonRetryable:
+                    await SnapshotAsync(request, response, SnapshotKind.HandlerError, nonRetryable.Message, nonRetryable, fromCache, token).ConfigureAwait(false);
                     Fail(request, FailureReason.NonRetryable, nonRetryable.Message, response.StatusCode, nonRetryable);
                     break;
                 default:
+                    await SnapshotAsync(request, response, SnapshotKind.HandlerError, ex.Message, ex, fromCache, token).ConfigureAwait(false);
                     if (_options.RetryOnHandlerError)
                     {
                         Logger.LogDebug(ex, "Handler \"{Label}\" failed on {Url}", request.Label, request.Url);
@@ -580,6 +625,77 @@ internal sealed class ScraperRun : IAsyncDisposable
         try { blockAware.ReportGoodResponse(request, response); }
         catch (Exception ex) { Logger.LogError(ex, "ReportGoodResponse threw"); }
     }
+
+    // ---------------------------------------------------------------- cache and snapshots
+
+    /// <summary>The page the cache keeps for the request, or null; a cache that throws is logged and the request is loaded.</summary>
+    private async Task<PageResponse?> LoadFromCacheAsync(ScrapeRequest request, CancellationToken token)
+    {
+        try
+        {
+            return await _cache!.LoadAsync(request, token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            Logger.LogWarning(ex, "The cache could not give {Url}: it is loaded", request.Url);
+            return null;
+        }
+    }
+
+    /// <summary>Offers the cache a page its handler took; the page is still here (its text is not released yet).</summary>
+    private async Task StoreInCacheAsync(ScrapeRequest request, PageResponse response, CancellationToken token)
+    {
+        if (_cache == null) return;
+        try
+        {
+            await _cache.StoreAsync(request, response, token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            Logger.LogWarning(ex, "The cache could not keep {Url}", request.Url);
+        }
+    }
+
+    /// <summary>
+    /// A page from the cache was not the page: the cache forgets it, and the request goes to its loader at once, as if the cache had not
+    /// had it. The kept page was no attempt, so it takes no retry and waits for no retry delay.
+    /// </summary>
+    private async Task LoadAgainAsync(ScrapeRequest request, string reason, CancellationToken token)
+    {
+        Logger.LogDebug("{Url} is loaded again: {Reason}", request.Url, reason);
+        try
+        {
+            await _cache!.RemoveAsync(request, token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            Logger.LogWarning(ex, "The cache could not forget {Url}", request.Url);
+        }
+        request.Attempts--;
+        Push(request);
+    }
+
+    /// <summary>Gives a page that was not taken to the snapshots; a load that brought no page has none.</summary>
+    private async Task SnapshotAsync(ScrapeRequest request, PageResponse? response, SnapshotKind kind, string reason, Exception? exception, bool fromCache,
+        CancellationToken token)
+    {
+        if (_snapshots == null || response == null) return;
+        try
+        {
+            await _snapshots.SaveAsync(new PageSnapshot(request, response, kind, reason, exception, fromCache), token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            Logger.LogWarning(ex, "The snapshot of {Url} could not be saved", request.Url);
+        }
+    }
+
+    private static SnapshotKind KindOf(ValidationOutcome outcome) => outcome switch
+    {
+        ValidationOutcome.Blocked => SnapshotKind.Blocked,
+        ValidationOutcome.NotFound => SnapshotKind.NotFound,
+        _ => SnapshotKind.Retry,
+    };
 
     private void RetryOrFail(ScrapeRequest request, string reason, PageResponse? response, Exception? error, FailureReason reasonWhenOut = FailureReason.RetriesExhausted)
     {
