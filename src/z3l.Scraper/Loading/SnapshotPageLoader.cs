@@ -140,6 +140,7 @@ public class SnapshotPageLoader : ISnapshotPageLoader
             writer.WriteString("label", request.Label);
             writer.WriteString("method", request.Method.Method);
             writer.WriteString("requestUrl", request.Url);
+            if (request.ParentUrl != null) writer.WriteString("parentUrl", request.ParentUrl);
             if (request.Body != null) writer.WriteString("requestBody", request.Body);
             writer.WriteNumber("attempt", request.Attempts);
             writer.WriteNumber("depth", request.Depth);

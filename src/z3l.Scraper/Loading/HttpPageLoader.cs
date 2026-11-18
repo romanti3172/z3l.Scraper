@@ -1,305 +1,51 @@
-using System.Buffers;
-using System.Collections.Concurrent;
-using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Security;
-using System.Runtime.CompilerServices;
-
 namespace z3l.Scraper.Loading;
 
-/// <summary>Settings of <see cref="HttpPageLoader"/>.</summary>
-public sealed class HttpPageLoaderOptions
+/// <summary>
+/// Settings of <see cref="HttpPageLoader"/>: those of <see cref="HttpClientPageLoaderOptions"/>, with an Accept for pages and an
+/// Accept-Language among the <see cref="HttpClientPageLoaderOptions.DefaultHeaders"/>.
+/// </summary>
+public sealed class HttpPageLoaderOptions : HttpClientPageLoaderOptions
 {
-    /// <summary>User-Agent header sent with every request unless the request sets its own; not used when <see cref="UserAgents"/> is set.</summary>
-    public string UserAgent { get; set; } =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
-
-    /// <summary>
-    /// User agents to rotate instead of <see cref="UserAgent"/>. With <see cref="Proxies"/> every proxy takes one user agent and keeps
-    /// it while the loader lives (as it keeps its cookies), so a site sees one browser per address; without proxies every request takes
-    /// the next one. A User-Agent in <see cref="DefaultHeaders"/> or in the request still wins.
-    /// </summary>
-    public UserAgentList? UserAgents { get; set; }
-
-    /// <summary>Headers sent with every request.</summary>
-    public Dictionary<string, string> DefaultHeaders { get; } = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>Creates the settings, with Accept and Accept-Language (en-US) in the default headers.</summary>
+    public HttpPageLoaderOptions()
     {
-        ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        ["Accept-Language"] = "en-US,en;q=0.9",
-    };
-
-    /// <summary>One proxy for all requests; when null (and no <see cref="Proxies"/>) the system proxy settings are used.</summary>
-    public IWebProxy? Proxy { get; set; }
-
-    /// <summary>
-    /// Proxies to rotate: each load takes the next one that may load from the site, a blocked answer rests the proxy for that
-    /// site (<see cref="ProxyList.BlockPolicy"/>), failures rest it for all sites. http, https (TLS to the proxy), socks4, socks4a and
-    /// socks5 proxies, with or without a login (<see cref="ProxyAddress.TryParse"/>). Every proxy has its own connections and cookies.
-    /// </summary>
-    public ProxyList? Proxies { get; set; }
-
-    /// <summary>
-    /// https proxies (TLS to the proxy): take the proxy's certificate whatever it is, issued for another name (a proxy reached by its
-    /// IP address), self-signed or expired; the sites' certificates are checked as always. The TLS to such a proxy only hides the
-    /// traffic from listeners: as with an http proxy, someone in the middle could pose as the proxy and see its login and the http
-    /// pages, while https pages stay encrypted up to the site. For <see cref="Proxies"/> and a <see cref="WebProxy"/> in
-    /// <see cref="Proxy"/>.
-    /// </summary>
-    public bool AcceptAnyProxyCertificate { get; set; }
-
-    /// <summary>Keep cookies between requests (one cookie jar for the loader, or one per proxy).</summary>
-    public bool UseCookies { get; set; } = true;
-
-    /// <summary>Largest body to read; a bigger response fails the request without retries. 0 means no limit.</summary>
-    public long MaxResponseBytes { get; set; } = 50 * 1024 * 1024;
+        DefaultHeaders["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+        DefaultHeaders["Accept-Language"] = "en-US,en;q=0.9";
+    }
 }
 
-/// <summary>Loads pages with <see cref="HttpClient"/>, directly or through rotating proxies. Thread-safe; dispose it when the scraping is over.</summary>
-public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
+/// <summary>
+/// Loads pages with <see cref="HttpClient"/>, directly or through rotating proxies, sending the request as it is: HTTP/1.1, the default
+/// headers, the headers of the request and the user agent. Thread-safe; dispose it when the scraping is over.
+/// <see cref="StealthHttpPageLoader"/> asks for pages the way a browser does.
+/// </summary>
+public sealed class HttpPageLoader : HttpClientPageLoader
 {
-    private readonly HttpClient? _client;
-    private readonly bool _ownsClient;
-    private readonly HttpPageLoaderOptions _options;
-    private readonly ConcurrentDictionary<string, Lazy<HttpClient>> _proxyClients = new();
-    private readonly ConcurrentDictionary<string, string> _proxyUserAgents = new();
-
-    /// <summary>Which proxy loaded a response, so a block reported for it rests the right proxy.</summary>
-    private readonly ConditionalWeakTable<PageResponse, ProxyList.Entry> _servedBy = [];
-    /// <summary>The proxy of the last load of a request, for <see cref="ReportTimeout"/> (a timed-out load has no response).</summary>
-    private readonly ConditionalWeakTable<ScrapeRequest, ProxyList.Entry> _lastProxy = [];
-
     /// <summary>Creates a loader with its own <see cref="HttpClient"/> (decompression, cookies, connection pooling).</summary>
-    /// <exception cref="ArgumentException">Both <see cref="HttpPageLoaderOptions.Proxy"/> and <see cref="HttpPageLoaderOptions.Proxies"/> are set.</exception>
+    /// <exception cref="ArgumentException">Both <see cref="HttpClientPageLoaderOptions.Proxy"/> and <see cref="HttpClientPageLoaderOptions.Proxies"/> are set.</exception>
     public HttpPageLoader(HttpPageLoaderOptions? options = null)
+        : base(options ?? new HttpPageLoaderOptions())
     {
-        _options = options ?? new HttpPageLoaderOptions();
-        if (_options.Proxy != null && _options.Proxies != null) throw new ArgumentException("Set Proxy or Proxies, not both", nameof(options));
-
-        if (_options.Proxies == null)
-        {
-            _client = CreateClient(_options.Proxy);
-            _ownsClient = true;
-        }
     }
 
     /// <summary>Uses an existing client (for example from <c>IHttpClientFactory</c>); it is not disposed by the loader.</summary>
-    /// <exception cref="ArgumentException"><see cref="HttpPageLoaderOptions.Proxies"/> is set: rotating proxies need clients of the loader.</exception>
+    /// <exception cref="ArgumentException"><see cref="HttpClientPageLoaderOptions.Proxies"/> is set: rotating proxies need clients of the loader.</exception>
     public HttpPageLoader(HttpClient client, HttpPageLoaderOptions? options = null)
+        : base(client, options ?? new HttpPageLoaderOptions())
     {
-        _client = client ?? throw new ArgumentNullException(nameof(client));
-        _options = options ?? new HttpPageLoaderOptions();
-        if (_options.Proxies != null) throw new ArgumentException("Rotating proxies need clients made by the loader: use HttpPageLoader(options)", nameof(options));
-        _ownsClient = false;
     }
 
     /// <inheritdoc />
-    public async Task<PageResponse> LoadAsync(ScrapeRequest request, CancellationToken cancellationToken)
+    protected override HttpRequestMessage CreateMessage(ScrapeRequest request, Uri uri, string? userAgent)
     {
-        if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-        {
-            throw new NonRetryableException($"Not an http(s) URL: \"{request.Url}\"");
-        }
-
-        using var message = CreateMessage(request, uri);
-
-        if (_options.Proxies is not { } proxies)
-        {
-            SetUserAgent(message, _options.UserAgents?.Next() ?? _options.UserAgent);
-            return await SendAsync(_client!, message, request, cancellationToken).ConfigureAwait(false);
-        }
-
-        var proxy = await proxies.AcquireAsync(uri.Host, cancellationToken).ConfigureAwait(false);
-        _lastProxy.AddOrUpdate(request, proxy);
-        SetUserAgent(message, _options.UserAgents is { } agents
-            ? _proxyUserAgents.GetOrAdd(proxy.Address.Key, static (_, list) => list.Next(), agents)
-            : _options.UserAgent);
-        var client = _proxyClients.GetOrAdd(proxy.Address.Key, _ => new Lazy<HttpClient>(() => CreateClient(proxy.Address.ToWebProxy()))).Value;
-        PageResponse response;
-        try
-        {
-            response = await SendAsync(client, message, request, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not (OperationCanceledException or NonRetryableException))
-        {
-            proxies.ReportFailure(proxy, ex.Message);       // no answer through this proxy
-            throw;
-        }
-
-        if (response.StatusCode == (int)HttpStatusCode.ProxyAuthenticationRequired) proxies.ReportFailure(proxy, "407 Proxy Authentication Required");
-        else proxies.ReportSuccess(proxy);
-        _servedBy.AddOrUpdate(response, proxy);
-        return response;
-    }
-
-    /// <summary>The scraper saw a block in this response: the proxy that loaded it rests for the site.</summary>
-    public void ReportBlocked(ScrapeRequest request, PageResponse response, string reason)
-    {
-        if (_options.Proxies is { } proxies && _servedBy.TryGetValue(response, out var proxy) && Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
-        {
-            proxies.ReportBlocked(proxy, uri.Host);
-        }
-    }
-
-    /// <summary>The response was not the page: after bad responses in a row the proxy that loaded it rests for the site.</summary>
-    public void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason)
-    {
-        if (_options.Proxies is { } proxies && _servedBy.TryGetValue(response, out var proxy) && Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
-        {
-            proxies.ReportBadResponse(proxy, uri.Host, reason);
-        }
-    }
-
-    /// <summary>The last load of the request timed out: a failure of its proxy.</summary>
-    public void ReportTimeout(ScrapeRequest request)
-    {
-        if (_options.Proxies is { } proxies && _lastProxy.TryGetValue(request, out var proxy)) proxies.ReportFailure(proxy, "timeout");
-    }
-
-    /// <summary>The response was the page: the bad responses in a row of its proxy for the site start again.</summary>
-    public void ReportGoodResponse(ScrapeRequest request, PageResponse response)
-    {
-        if (_options.Proxies is { } proxies && _servedBy.TryGetValue(response, out var proxy) && Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
-        {
-            proxies.ReportGoodResponse(proxy, uri.Host);
-        }
-    }
-
-    private HttpClient CreateClient(IWebProxy? proxy)
-    {
-        var handler = new SocketsHttpHandler
-        {
-            AutomaticDecompression = DecompressionMethods.All,
-            UseCookies = _options.UseCookies,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            AllowAutoRedirect = true,
-        };
-        if (proxy != null)
-        {
-            handler.Proxy = proxy;     // without it the system proxy (HTTP_PROXY, Windows settings) is used
-        }
-        if (_options.AcceptAnyProxyCertificate && (proxy as WebProxy)?.Address is { Scheme: "https" } address)
-        {
-            // one callback checks the TLS to the proxy and the TLS to the sites inside it: they differ by the host they are for
-            var proxyHost = address.IdnHost.Trim('[', ']');
-            handler.SslOptions.RemoteCertificateValidationCallback = (sender, _, _, errors) => errors == SslPolicyErrors.None
-                || sender is SslStream { TargetHostName: { } host } && string.Equals(host.Trim('[', ']'), proxyHost, StringComparison.OrdinalIgnoreCase);
-        }
-        return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };   // the scraper applies RequestTimeout
-    }
-
-    private HttpRequestMessage CreateMessage(ScrapeRequest request, Uri uri)
-    {
-        var message = new HttpRequestMessage(request.Method, uri);
-
-        if (request.Body != null)
-        {
-            var contentType = request.ContentType ?? "application/x-www-form-urlencoded";
-            if (!MediaTypeHeaderValue.TryParse(contentType, out var mediaType))
-            {
-                message.Dispose();
-                throw new NonRetryableException($"Bad ContentType \"{contentType}\"");
-            }
-            message.Content = new StringContent(request.Body);
-            message.Content.Headers.ContentType = mediaType;
-        }
-
-        foreach (var header in _options.DefaultHeaders) SetHeader(message, header.Key, header.Value);
+        var message = NewMessage(request, uri);
+        foreach (var header in Options.DefaultHeaders) SetHeader(message, header.Key, header.Value);
         if (request.Headers != null)
         {
             foreach (var header in request.Headers) SetHeader(message, header.Key, header.Value);
         }
+        // the loader's user agent, unless the default headers or the request set one
+        if (userAgent != null && !message.Headers.Contains("User-Agent")) message.Headers.TryAddWithoutValidation("User-Agent", userAgent);
         return message;
-    }
-
-    private async Task<PageResponse> SendAsync(HttpClient client, HttpRequestMessage message, ScrapeRequest request, CancellationToken cancellationToken)
-    {
-        using var response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-
-        if (_options.MaxResponseBytes > 0 && response.Content.Headers.ContentLength > _options.MaxResponseBytes)
-        {
-            throw new NonRetryableException($"Response is {response.Content.Headers.ContentLength} bytes, more than MaxResponseBytes {_options.MaxResponseBytes}");
-        }
-
-        var body = await ReadBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
-
-        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var header in response.Headers) headers[header.Key] = string.Join(", ", header.Value);
-        foreach (var header in response.Content.Headers) headers[header.Key] = string.Join(", ", header.Value);
-
-        var finalUrl = response.RequestMessage?.RequestUri?.AbsoluteUri ?? request.Url;
-        return new PageResponse((int)response.StatusCode, finalUrl, body, response.Content.Headers.ContentType?.ToString(), headers);
-    }
-
-    /// <summary>
-    /// Reads the body into pooled buffers and copies it once into an array of its size. Growing arrays of its own would
-    /// cost about three times the page for every page, mostly on the large object heap (arrays over 85 KB), which only
-    /// full collections clean.
-    /// </summary>
-    private async Task<byte[]> ReadBodyAsync(HttpContent content, CancellationToken cancellationToken)
-    {
-        var limit = _options.MaxResponseBytes > 0 ? _options.MaxResponseBytes : long.MaxValue;
-        await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-
-        // the length is unknown for compressed and chunked answers; with a known one a single buffer is enough
-        var length = content.Headers.ContentLength;
-        var buffer = ArrayPool<byte>.Shared.Rent(length is > 0 and < MaxBodyLength ? (int)length.Value + 1 : FirstBufferSize);
-        var total = 0;
-        try
-        {
-            while (true)
-            {
-                if (total == buffer.Length)
-                {
-                    if (buffer.Length >= MaxBodyLength) throw new NonRetryableException($"Response is more than {MaxBodyLength} bytes");
-                    var bigger = ArrayPool<byte>.Shared.Rent((int)Math.Min(2L * buffer.Length, MaxBodyLength));
-                    buffer.AsSpan(0, total).CopyTo(bigger);
-                    ArrayPool<byte>.Shared.Return(buffer);
-                    buffer = bigger;
-                }
-
-                var read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken).ConfigureAwait(false);
-                if (read == 0) break;
-                total += read;
-                if (total > limit) throw new NonRetryableException($"Response is more than MaxResponseBytes {_options.MaxResponseBytes}");
-            }
-            return total == 0 ? [] : buffer.AsSpan(0, total).ToArray();
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
-
-    private const int FirstBufferSize = 64 * 1024;
-    private const int MaxBodyLength = 0x7FFFFFC7;    // Array.MaxLength
-
-    /// <summary>The loader's user agent, unless the default headers or the request set one.</summary>
-    private static void SetUserAgent(HttpRequestMessage message, string userAgent)
-    {
-        if (!message.Headers.Contains("User-Agent")) message.Headers.TryAddWithoutValidation("User-Agent", userAgent);
-    }
-
-    private static void SetHeader(HttpRequestMessage message, string name, string value)
-    {
-        if (message.Content != null && name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase))
-        {
-            message.Content.Headers.Remove(name);
-            message.Content.Headers.TryAddWithoutValidation(name, value);
-            return;
-        }
-        message.Headers.Remove(name);
-        message.Headers.TryAddWithoutValidation(name, value);
-    }
-
-    /// <inheritdoc />
-    public void Dispose()
-    {
-        if (_ownsClient) _client?.Dispose();
-        foreach (var client in _proxyClients.Values)
-        {
-            if (client.IsValueCreated) client.Value.Dispose();
-        }
-        _proxyClients.Clear();
-        _proxyUserAgents.Clear();
     }
 }

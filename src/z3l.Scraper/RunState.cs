@@ -203,6 +203,7 @@ internal static class RunState
         if (request.UniqueKey != null) writer.WriteString("uniqueKey", request.UniqueKey);
         if (request.SkipDuplicateCheck) writer.WriteBoolean("skipDuplicateCheck", true);
         if (request.Depth != 0) writer.WriteNumber("depth", request.Depth);
+        if (request.ParentUrl != null) writer.WriteString("parentUrl", request.ParentUrl);
         if (request.Data != null)
         {
             writer.WritePropertyName("data");
@@ -230,6 +231,7 @@ internal static class RunState
             Data = item.TryGetProperty("data", out var data) || item.TryGetProperty("userData", out data) ? codec.Read(label, data) : null,
         };
         request.Depth = item.TryGetProperty("depth", out var depth) ? depth.GetInt32() : 0;
+        request.ParentUrl = item.TryGetProperty("parentUrl", out var parentUrl) ? parentUrl.GetString() : null;
         return request;
     }
 }
