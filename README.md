@@ -31,6 +31,8 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 - **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser or anything else.
 - **Cache and snapshots.** Pages the handlers took are kept and given back, so you work on handlers without loading the
   site each time; pages that were blocked, missing or broken are saved, so you see what the site answered.
+- **One page through its handler.** `ParseAsync` loads a page, or takes a saved one, and runs its handler without
+  crawling on: what it emits, the pages it found, what the checks said. For trying a handler and for its tests.
 - **Trimming and AOT compatible.**
 
 ## Install
@@ -220,6 +222,37 @@ each key, about 40 bytes a page), and the list of failed requests. The text of a
 that the response checks, `ctx.Html` and `ctx.Json` read in place: a string of it is made only when a handler reads
 `ctx.Response.Text`.
 
+## One page through its handler
+
+`ParseAsync` loads one page and runs its handler as a run would, but loads nothing else: the pages the handler queues
+come back in `Found` instead. Try a handler on a live page without crawling the site:
+
+```csharp
+var page = await scraper.ParseAsync("https://shop.example/catalog?page=2", PageType.Listing);
+page.Items          // what the handler emitted
+page.Found          // the pages it queued (URL, label, data), not loaded
+page.Validation     // what the response checks said: Ok, Retry, Blocked or NotFound, and why
+page.Response       // the page: status, headers, text
+page.Exception      // what the handler threw, if it did
+```
+
+The same on a page at hand, a saved one for example, with no loader and no network, for tests of the handlers:
+
+```csharp
+var html = File.ReadAllText("catalog.html");
+var page = await scraper.ParseAsync(PageResponse.FromText(200, "https://shop.example/catalog", html), PageType.Listing);
+Assert.AreEqual(24, page.Found.Count);
+```
+
+- One attempt with the loader of the label and `RequestTimeout`; no retries, robots.txt, throttle, cache, snapshots, state
+  or `Stats`, so it may go while a run goes. A network error throws, and no response in time throws `TimeoutException`.
+- The page is checked with the rules of its label, and the handler runs only when it passes, as in a run.
+- `Found` takes what a run would take: duplicates and URLs that are not http(s) are left out, and `ctx.Enqueue` returns
+  false for them as in a run. `MaxDepth` and `MaxRequests` do not apply.
+- Items emitted before the handler threw stay in `Items`, and `Exception` holds what it threw. `Succeeded` is true when
+  the page passed the checks and the handler finished.
+- A typed handler needs its data: `ParseAsync(ScrapeRequest.For(url, PageType.Item, teaser))`.
+
 ## Response checks
 
 ```csharp
@@ -373,7 +406,9 @@ crawled without rules.
 ## Depth
 
 `ctx.Request.Depth` is 0 for start requests and one more than the page that queued it. `MaxDepth` skips deeper links
-(a page found too deep is still taken if another path reaches it closer).
+(a page found too deep is still taken if another path reaches it closer). `MaxDepth = 0` loads only the start requests
+and those of `RequestsNeeded`: the pages the handlers queue are skipped. To see them without loading them, use
+`ParseAsync`.
 
 ## Resuming a run
 
@@ -411,7 +446,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `MaxRequestsPerMinute` | none | loads spread evenly, retries included |
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
 | `RequestsNeededBelow` | 1000 | with `RequestsNeeded` handlers: ask for more requests when fewer are unfinished |
-| `MaxDepth` | none | deepest link to follow; start requests are depth 0 |
+| `MaxDepth` | none | deepest link to follow; start requests are depth 0, so 0 loads only them |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |

@@ -265,7 +265,69 @@ public sealed class Scraper
     /// <summary>Runs the scraping from one or more requests and collects everything.</summary>
     public Task<ScrapeResult> RunToListAsync(params ScrapeRequest[] startRequests) => RunToListAsync((IEnumerable<ScrapeRequest>)startRequests);
 
+    /// <summary>
+    /// Loads one page and runs its handler as a run would, but loads nothing else: the pages the handler queues are not loaded,
+    /// they come back in <see cref="ParseResult.Found"/>. For trying a handler on a live page: what it emits, what it queues and
+    /// what the response checks say, without crawling on.
+    /// <para>
+    /// One attempt, with the loader of the label and <see cref="ScraperOptions.RequestTimeout"/>, and no retries. No robots.txt,
+    /// throttle, cache, snapshots, state or <see cref="Stats"/>, so it may go while a run goes; the loader hears nothing back
+    /// about the page. The handler runs only when the page passes the checks, as in a run.
+    /// </para>
+    /// </summary>
+    /// <param name="url">Absolute http(s) URL of the page.</param>
+    /// <param name="label">Handler label: a <see cref="PageType"/> or a string; the default label when omitted.</param>
+    /// <param name="cancellationToken">Cancels the load and the handler.</param>
+    /// <exception cref="ArgumentException">The URL is not an absolute http(s) URL.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// No handler for the label, or a typed handler: pass a request with its data (<see cref="ScrapeRequest.For{TData}(string, ScrapeLabel, TData)"/>).
+    /// </exception>
+    /// <exception cref="TimeoutException">No response within <see cref="ScraperOptions.RequestTimeout"/>. A network error of the loader is thrown as it is.</exception>
+    public Task<ParseResult> ParseAsync(string url, ScrapeLabel label = default, CancellationToken cancellationToken = default) =>
+        ParseAsync(new ScrapeRequest(url, label), cancellationToken);
+
+    /// <summary>
+    /// Loads one page by its request (a POST, headers, data for a typed handler) and runs its handler, loading nothing else;
+    /// see <see cref="ParseAsync(string, ScrapeLabel, CancellationToken)"/>.
+    /// </summary>
+    public Task<ParseResult> ParseAsync(ScrapeRequest request, CancellationToken cancellationToken = default) =>
+        PageParse.ParseAsync(this, request, null, cancellationToken);
+
+    /// <summary>
+    /// Runs the handler of <paramref name="label"/> on a page at hand, a saved one for example, with no loader and no network: for
+    /// testing a handler, <c>ParseAsync(PageResponse.FromText(200, url, html), PageType.Listing)</c>. The page is checked with the
+    /// rules of the label first; see <see cref="ParseAsync(string, ScrapeLabel, CancellationToken)"/>.
+    /// </summary>
+    public Task<ParseResult> ParseAsync(PageResponse response, ScrapeLabel label = default, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return PageParse.ParseAsync(this, new ScrapeRequest(response.Url, label), response, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs the handler of a request (data for a typed handler) on a page at hand, with no loader;
+    /// see <see cref="ParseAsync(PageResponse, ScrapeLabel, CancellationToken)"/>.
+    /// </summary>
+    public Task<ParseResult> ParseAsync(ScrapeRequest request, PageResponse response, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return PageParse.ParseAsync(this, request, response, cancellationToken);
+    }
+
     internal ScrapeRoute? FindRoute(string label) => _routes.TryGetValue(label, out var route) ? route : _fallbackRoute;
+
+    /// <summary>The handler of a request: throws when its label has none, or when it lacks the data its typed handler takes.</summary>
+    internal ScrapeRoute RouteOf(ScrapeRequest request)
+    {
+        var route = FindRoute(request.Label)
+                    ?? throw new InvalidOperationException($"No handler for label \"{request.Label}\": register it with Route(\"{request.Label}\", handler) or add FallbackRoute");
+        if (route.DataType != null && !route.DataType.IsInstanceOfType(request.Data))
+        {
+            throw WrongData(request.Label, route.DataType, request.Data);
+        }
+        ScrapeContext.ThrowIfPageBound(request.Data, nameof(request));
+        return route;
+    }
 
     internal static InvalidOperationException WrongData(string label, Type expected, object? data) => new(data is null
         ? $"The handler of \"{label}\" takes {expected.Name} data and the request has none: queue it with Enqueue(url, label, data)"

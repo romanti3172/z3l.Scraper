@@ -61,7 +61,9 @@ public sealed class ScraperOptions
 
     /// <summary>
     /// Deepest link to follow: start requests have depth 0, the pages they queue 1, and so on. Deeper requests are skipped
-    /// and counted in <see cref="ScraperStats.SkippedByLimit"/>. Null for no limit.
+    /// and counted in <see cref="ScraperStats.SkippedByLimit"/>. 0 loads only the start requests and those of
+    /// <see cref="Scraper.RequestsNeeded"/>: the pages the handlers queue are skipped (<see cref="Scraper.ParseAsync(string, ScrapeLabel, CancellationToken)"/>
+    /// shows them without loading them). Null for no limit.
     /// </summary>
     public int? MaxDepth { get; set; }
 
