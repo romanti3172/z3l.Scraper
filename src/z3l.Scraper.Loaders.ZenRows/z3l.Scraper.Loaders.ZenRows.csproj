@@ -5,7 +5,7 @@
   <PropertyGroup>
     <RootNamespace>z3l.Scraper.Loaders.ZenRows</RootNamespace>
     <AssemblyName>z3l.Scraper.Loaders.ZenRows</AssemblyName>
-    <!-- not published yet: written from ZenRows' documentation, not checked against the real API -->
+    <!-- not published yet: written from ZenRows' documentation, not checked against the real API; that needs a key (TODO.md) -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

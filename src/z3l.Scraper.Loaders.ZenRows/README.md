@@ -7,8 +7,8 @@ go at once (the plan's limit), no new call starts while the scraper's handlers a
 is loaded again with premium proxies or a browser.
 
 > **Not checked against the real API.** The loader follows ZenRows' documentation and its OpenAPI description as they were in
-> November 2026. It has not met the real API yet: no key was at hand. `ZenRowsLiveTests` check it once there is one; what the
-> documentation leaves open is listed at the end.
+> November 2026. It has not met the real API yet: checking it needs a ZenRows API key. `ZenRowsLiveTests` check it once there
+> is one; what the documentation leaves open is in [TODO.md](TODO.md).
 
 ## Use
 
@@ -83,20 +83,10 @@ var scraper = new Scraper(loader, new ScraperOptions { MaxConcurrency = 8 })    
 
 `ZenRowsLiveTests` run against the real API when `Z3L_TEST_ZENROWS` holds an API key; a run should spend about 80 credits.
 Without the key they are skipped, and the other tests use a fake service that answers as the documentation says. They have not
-run yet.
-
-What the documentation leaves open, and the loader assumes:
-- With `original_status=true` the status of every answer is the site's, a page ZenRows could not get (RESP001) included: the
-  docs advise it to see the site's status behind a 422, and say no more. Without it, every such page would be a 422, and a
-  5xx of the site would go a level up too.
-- ZenRows' errors come as `application/problem+json` with a `code` (the OpenAPI description; the docs show no whole example).
-  An answer without such a code is taken for the site's page.
-- `X-Request-Credits` holds the credits of a call. Only the OpenAPI description lists it; the docs' table of headers has
-  `X-Request-Cost` alone, which the OpenAPI description gives in US dollars.
-- The Content-Type of a POST or PUT body reaches the site: the OpenAPI description says the body goes to the site as it is,
-  and nothing of its type.
-- ZenRows renders no JavaScript for POST and PUT: the docs of its Python SDK say so, the API reference does not.
-- `proxy_country` goes with `mode=auto` without premium proxies: the docs say both that the country needs premium proxies and
-  that it works with `mode=auto`.
-- A 404 comes with ZenRows' error document (RESP002) rather than the site's page; the loader returns either as the page.
-- Too many calls at once is AUTH006 in the docs and AUTH008 in the OpenAPI description; both are retried.
+run yet: there was no key. [TODO.md](TODO.md) lists what they should answer, the points the documentation leaves open and the
+loader assumes for now:
+- the status of an answer with `original_status=true` is the site's, a page ZenRows could not get (RESP001) included;
+- ZenRows' errors come as `application/problem+json` with a `code`, and an answer without one is the site's page;
+- `X-Request-Credits` holds the credits of a call (`X-Request-Cost` is US dollars);
+- the Content-Type of a POST or PUT body reaches the site, and ZenRows renders no JavaScript for them;
+- `proxy_country` goes with `mode=auto` without premium proxies.

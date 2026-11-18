@@ -6,7 +6,8 @@ namespace z3l.Scraper.Loaders.ZenRows.Tests;
 /// <summary>
 /// ZenRowsPageLoader against the real API: set Z3L_TEST_ZENROWS to an API key (a trial key should do; a run should spend about 80
 /// credits). The pages are httpbin.org, example.com and quotes.toscrape.com. One test at a time: a trial plan allows 5 calls at
-/// once, and more answer 429. They have not run yet: no key was at hand when the loader was written.
+/// once, and more answer 429. They have not run yet: there was no key. src/z3l.Scraper.Loaders.ZenRows/TODO.md lists what they
+/// should answer.
 /// </summary>
 [TestClass]
 [DoNotParallelize]
