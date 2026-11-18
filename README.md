@@ -261,20 +261,32 @@ var proxies = ProxyList.FromFile("proxies.txt", ProxyBlockPolicy.Block1Hour, log
 using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
 ```
 
-One proxy per line, `#` for comments:
+One proxy per line; a `#` at the start of a line or after a space starts a comment:
 
 ```
 1.2.3.4:8080                     # http
 1.2.3.4:8080:user:password
 user:password@1.2.3.4:8080
 socks5://user:password@1.2.3.4:1080
+socks5://1.2.3.4:1080:user:password
+[2001:db8::1]:8080
 https://proxy.example:443
 ```
 
 http, https, socks4, socks4a and socks5 proxies, with or without a login, are handled by .NET itself; every proxy has
-its own connections and cookies. Proxies are given out in turn. When a site blocks an answer, the proxy that loaded it
-rests for that site only, as `ProxyBlockPolicy` says: `Ignore`, `Block10Minutes`, `Block1Hour` (the default),
-`Block1Day` or `Remove`.
+its own connections and cookies. A line without a scheme is an http proxy. `socks5h://` is read as socks5, which lets the
+proxy resolve the site's name, as socks4a does (socks4 gets an address resolved here). A login may hold any character;
+before `@` it may also be URL-encoded (`%40` for `@`).
+
+`https://` is TLS to the proxy itself, and the proxy's certificate must be valid for its name. A proxy reached by its IP
+address often shows a certificate of a host name, or a self-signed one: `AcceptAnyProxyCertificate = true` takes any
+certificate from https proxies, while the sites' certificates are checked as always. Such TLS only hides the traffic from
+listeners: as with an http proxy, someone in the middle could pose as the proxy and see its login and the http pages.
+What proxy sellers call an "HTTPS proxy" is usually a plain http proxy that tunnels https pages with CONNECT: write it as
+`http://`. An http proxy that cannot CONNECT loads http pages only.
+
+Proxies are given out in turn. When a site blocks an answer, the proxy that loaded it rests for that site only, as
+`ProxyBlockPolicy` says: `Ignore`, `Block10Minutes`, `Block1Hour` (the default), `Block1Day` or `Remove`.
 
 A failure (no connection, a timeout, 407) or a bad response (the proxy answered, but not with the page: its own page, a
 cut-off one, the page fails `MustContain`, the format or another check, comes with a 5xx, or the handler throws

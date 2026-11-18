@@ -1,4 +1,11 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -35,6 +42,13 @@ public sealed class ProxyTests
     [DataRow("SOCKS4A://h.test:1080", "socks4a", "h.test", 1080, null, null)]
     [DataRow("  https://secure.test:443   # office", "https", "secure.test", 443, null, null)]
     [DataRow("http://p.test:80", "http", "p.test", 80, null, null)]
+    [DataRow("socks5h://u:p@10.0.0.1:1080", "socks5", "10.0.0.1", 1080, "u", "p")]
+    [DataRow("socks5://10.0.0.1:1080:user:pa:ss", "socks5", "10.0.0.1", 1080, "user", "pa:ss")]
+    [DataRow("1.2.3.4:8080:me@mail.test:p@ss#1/2 # office", "http", "1.2.3.4", 8080, "me@mail.test", "p@ss#1/2")]
+    [DataRow("user:p@ss#1/2@proxy.test:3128", "http", "proxy.test", 3128, "user", "p@ss#1/2")]
+    [DataRow("[2001:DB8::1]:8080", "http", "2001:db8::1", 8080, null, null)]
+    [DataRow("[2001:db8::1]:8080:user:pass", "http", "2001:db8::1", 8080, "user", "pass")]
+    [DataRow("socks5://user:pass@[2001:db8::1]:1080", "socks5", "2001:db8::1", 1080, "user", "pass")]
     public void Parses(string line, string scheme, string host, int port, string? user, string? password)
     {
         Assert.IsTrue(ProxyAddress.TryParse(line, out var proxy));
@@ -49,9 +63,30 @@ public sealed class ProxyTests
     [DataRow("socks5://1.2.3.4")]
     [DataRow("host:notaport")]
     [DataRow("1.2.3.4:99999")]
+    [DataRow("socks://1.2.3.4:1080")]           // socks4 or socks5?
+    [DataRow("2001:db8::1:8080")]               // an IPv6 address goes in brackets
+    [DataRow("[2001:db8::1]")]
+    [DataRow("1.2.3.4:8080#office")]            // a comment starts after a space
     public void Rejects(string line)
     {
         Assert.IsFalse(ProxyAddress.TryParse(line, out _));
+    }
+
+    [TestMethod]
+    public void IPv6Address_IsBracketedInTheUriAndTheText()
+    {
+        Assert.IsTrue(ProxyAddress.TryParse("socks5://user:secret@[2001:db8::1]:1080", out var proxy));
+
+        Assert.AreEqual("socks5://user@[2001:db8::1]:1080", proxy.ToString());
+        Assert.AreEqual("[2001:db8::1]", proxy.Uri.Host);
+        Assert.AreEqual(1080, proxy.Uri.Port);
+        Assert.AreEqual("http://[2001:db8::1]:8080/", new ProxyAddress("http", "2001:db8::1", 8080).Uri.AbsoluteUri);
+    }
+
+    [TestMethod]
+    public void Socks5h_IsTheSameProxyAsSocks5()
+    {
+        Assert.AreEqual(1, new ProxyList(["socks5h://u:p@a.test:1080", "socks5://u:p@a.test:1080"]).Count);
     }
 
     [TestMethod]
@@ -326,11 +361,11 @@ public sealed class ProxyTests
         public ConcurrentQueue<string> Requests { get; } = new();
         public ConcurrentQueue<string> UserAgents { get; } = new();
 
-        public static async Task<FakeProxy> StartAsync(int status, string body, TimeSpan delay = default)
+        public static async Task<FakeProxy> StartAsync(int status, string body, TimeSpan delay = default, string host = "127.0.0.1")
         {
             var builder = WebApplication.CreateSlimBuilder();
             builder.Logging.ClearProviders();
-            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            builder.WebHost.UseUrls($"http://{host}:0");
             var app = builder.Build();
             var proxy = new FakeProxy(app);
             app.Run(async http =>
@@ -426,6 +461,262 @@ public sealed class ProxyTests
 
     private static ProxyStatus StatusOf(ProxyList proxies, FakeProxy proxy) =>
         proxies.Status().Single(s => s.Address.Port == new Uri(proxy.Address).Port);
+
+    /// <summary>A SOCKS5 proxy that is also the site: it records the login and the CONNECT, then answers the page itself.</summary>
+    private sealed class FakeSocks5 : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+
+        public FakeSocks5()
+        {
+            _listener.Start();
+            _ = AcceptAsync();
+        }
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+        public ConcurrentQueue<string> Logins { get; } = new();
+        public ConcurrentQueue<string> Connects { get; } = new();
+
+        private async Task AcceptAsync()
+        {
+            while (true)
+            {
+                TcpClient client;
+                try { client = await _listener.AcceptTcpClientAsync(); }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { return; }     // stopped
+                _ = ServeAsync(client);
+            }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using (client)
+            {
+                try
+                {
+                    var stream = client.GetStream();
+                    var methods = await ReadAsync(stream, (await ReadAsync(stream, 2))[1]);
+                    if (methods.Contains((byte)2))
+                    {
+                        await stream.WriteAsync(new byte[] { 5, 2 });
+                        await ReadAsync(stream, 1);
+                        var user = Encoding.UTF8.GetString(await ReadAsync(stream, (await ReadAsync(stream, 1))[0]));
+                        var password = Encoding.UTF8.GetString(await ReadAsync(stream, (await ReadAsync(stream, 1))[0]));
+                        Logins.Enqueue($"{user}:{password}");
+                        await stream.WriteAsync(new byte[] { 1, 0 });
+                    }
+                    else
+                    {
+                        await stream.WriteAsync(new byte[] { 5, 0 });
+                    }
+
+                    var request = await ReadAsync(stream, 4);       // version, command, reserved, address type
+                    var host = request[3] == 3
+                        ? "name " + Encoding.ASCII.GetString(await ReadAsync(stream, (await ReadAsync(stream, 1))[0]))
+                        : "address " + new IPAddress(await ReadAsync(stream, request[3] == 1 ? 4 : 16));
+                    var port = await ReadAsync(stream, 2);
+                    Connects.Enqueue($"{host}:{port[0] << 8 | port[1]}");
+                    await stream.WriteAsync(new byte[] { 5, 0, 0, 1, 0, 0, 0, 0, 0, 0 });
+
+                    var received = new StringBuilder();
+                    var buffer = new byte[4096];
+                    while (!received.ToString().Contains("\r\n\r\n", StringComparison.Ordinal))
+                    {
+                        var read = await stream.ReadAsync(buffer);
+                        if (read == 0) return;
+                        received.Append(Encoding.ASCII.GetString(buffer, 0, read));
+                    }
+                    const string body = "<html><body>ok</body></html>";
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"));
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or EndOfStreamException)
+                {
+                    // the client went away
+                }
+            }
+        }
+
+        private static async Task<byte[]> ReadAsync(Stream stream, int count)
+        {
+            var buffer = new byte[count];
+            await stream.ReadExactlyAsync(buffer);
+            return buffer;
+        }
+
+        public void Dispose() => _listener.Stop();
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_Socks5hWithARawLogin_TheProxyGetsTheLoginAndTheSiteName()
+    {
+        using var socks = new FakeSocks5();
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = new ProxyList([$"socks5h://user:p@ss#1@127.0.0.1:{socks.Port}"]) });
+
+        var page = await loader.LoadAsync($"http://{Site}/p/1", CancellationToken.None);
+
+        Assert.AreEqual(200, page.StatusCode);
+        Assert.AreEqual("user:p@ss#1", socks.Logins.Single());
+        Assert.AreEqual($"name {Site}:80", socks.Connects.Single());      // the proxy resolves the name
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_ProxyOnAnIPv6Address()
+    {
+        FakeProxy? started = null;
+        try
+        {
+            started = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>", host: "[::1]");
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            // no IPv6 loopback here
+        }
+        if (started == null) Assert.Inconclusive("No IPv6 loopback here");
+        await using var proxy = started;
+        var proxies = new ProxyList([proxy.Address]);
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
+
+        var page = await loader.LoadAsync($"http://{Site}/p/1", CancellationToken.None);
+
+        Assert.AreEqual("::1", proxies.Status().Single().Address.Host);
+        Assert.AreEqual(200, page.StatusCode);
+        Assert.AreEqual($"{Site}/p/1", proxy.Requests.Single());
+    }
+
+    /// <summary>
+    /// An https proxy (TLS to the proxy) whose certificate names another host. It answers http pages itself; behind a CONNECT it
+    /// plays the site, with a self-signed certificate of the site's name.
+    /// </summary>
+    private sealed class FakeTlsProxy : IDisposable
+    {
+        private static readonly Lazy<X509Certificate2> ProxyCertificate = new(() => SelfSigned("proxy.example"));
+        private static readonly Lazy<X509Certificate2> SiteCertificate = new(() => SelfSigned(Site));
+        private const string Page = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 28\r\n\r\n<html><body>ok</body></html>";
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+
+        public FakeTlsProxy()
+        {
+            _listener.Start();
+            _ = AcceptAsync();
+        }
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+        public ConcurrentQueue<string> Requests { get; } = new();
+
+        private async Task AcceptAsync()
+        {
+            while (true)
+            {
+                TcpClient client;
+                try { client = await _listener.AcceptTcpClientAsync(); }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { return; }     // stopped
+                _ = ServeAsync(client);
+            }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using (client)
+            {
+                try
+                {
+                    await using var proxy = new SslStream(client.GetStream());
+                    await proxy.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = ProxyCertificate.Value });
+                    while (await ReadRequestLineAsync(proxy) is { } requestLine)
+                    {
+                        Requests.Enqueue(requestLine);
+                        if (requestLine.StartsWith("CONNECT ", StringComparison.Ordinal))
+                        {
+                            await WriteAsync(proxy, "HTTP/1.1 200 Connection established\r\n\r\n");
+                            await using var site = new SslStream(proxy, leaveInnerStreamOpen: true);
+                            await site.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = SiteCertificate.Value });
+                            if (await ReadRequestLineAsync(site) != null) await WriteAsync(site, Page);
+                            return;
+                        }
+                        await WriteAsync(proxy, Page);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or AuthenticationException or ObjectDisposedException)
+                {
+                    // the client went away, or turned a certificate down
+                }
+            }
+        }
+
+        /// <summary>The request line of the next request, its other headers skipped; null when the client is gone.</summary>
+        private static async Task<string?> ReadRequestLineAsync(Stream stream)
+        {
+            var head = new StringBuilder();
+            var one = new byte[1];
+            while (head.Length < 4 || head[^4] != '\r' || head[^3] != '\n' || head[^2] != '\r' || head[^1] != '\n')
+            {
+                if (await stream.ReadAsync(one) == 0) return null;
+                head.Append((char)one[0]);
+            }
+            var text = head.ToString();
+            return text[..text.IndexOf("\r\n", StringComparison.Ordinal)];
+        }
+
+        private static async Task WriteAsync(Stream stream, string text)
+        {
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(text));
+            await stream.FlushAsync();
+        }
+
+        private static X509Certificate2 SelfSigned(string name)
+        {
+            using var key = RSA.Create(2048);
+            var request = new CertificateRequest($"CN={name}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            var names = new SubjectAlternativeNameBuilder();
+            names.AddDnsName(name);
+            request.CertificateExtensions.Add(names.Build());
+            using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            return X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentType.Pfx), null);     // SChannel wants a stored key
+        }
+
+        public void Dispose() => _listener.Stop();
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_HttpsProxyWithACertificateOfAnotherName_WorksOnlyWithAcceptAnyProxyCertificate()
+    {
+        using var tls = new FakeTlsProxy();
+        var line = $"https://127.0.0.1:{tls.Port}";
+
+        using (var strict = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = new ProxyList([line]) }))
+        {
+            var error = await Assert.ThrowsAsync<HttpRequestException>(() => strict.LoadAsync($"http://{Site}/p/1", CancellationToken.None));
+            Assert.IsInstanceOfType<AuthenticationException>(error.InnerException);
+        }
+        Assert.HasCount(0, tls.Requests);
+
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = new ProxyList([line]), AcceptAnyProxyCertificate = true });
+        var page = await loader.LoadAsync($"http://{Site}/p/1", CancellationToken.None);
+
+        Assert.AreEqual(200, page.StatusCode);
+        Assert.AreEqual($"GET http://{Site}/p/1 HTTP/1.1", tls.Requests.Single());
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_AcceptAnyProxyCertificate_StillChecksTheSitesCertificate()
+    {
+        using var tls = new FakeTlsProxy();
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions
+        {
+            Proxies = new ProxyList([$"https://127.0.0.1:{tls.Port}"]),
+            AcceptAnyProxyCertificate = true,
+        });
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => loader.LoadAsync($"https://{Site}/p/1", CancellationToken.None));
+
+        Assert.AreEqual($"CONNECT {Site}:443 HTTP/1.1", tls.Requests.Single());     // the proxy's certificate was taken
+        Assert.IsInstanceOfType<AuthenticationException>(error.InnerException);      // the site's self-signed one was not
+    }
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
