@@ -1,6 +1,10 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -580,6 +584,138 @@ public sealed class ProxyTests
         Assert.AreEqual("::1", proxies.Status().Single().Address.Host);
         Assert.AreEqual(200, page.StatusCode);
         Assert.AreEqual($"{Site}/p/1", proxy.Requests.Single());
+    }
+
+    /// <summary>
+    /// An https proxy (TLS to the proxy) whose certificate names another host. It answers http pages itself; behind a CONNECT it
+    /// plays the site, with a self-signed certificate of the site's name.
+    /// </summary>
+    private sealed class FakeTlsProxy : IDisposable
+    {
+        private static readonly Lazy<X509Certificate2> ProxyCertificate = new(() => SelfSigned("proxy.example"));
+        private static readonly Lazy<X509Certificate2> SiteCertificate = new(() => SelfSigned(Site));
+        private const string Page = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 28\r\n\r\n<html><body>ok</body></html>";
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+
+        public FakeTlsProxy()
+        {
+            _listener.Start();
+            _ = AcceptAsync();
+        }
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+        public ConcurrentQueue<string> Requests { get; } = new();
+
+        private async Task AcceptAsync()
+        {
+            while (true)
+            {
+                TcpClient client;
+                try { client = await _listener.AcceptTcpClientAsync(); }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { return; }     // stopped
+                _ = ServeAsync(client);
+            }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using (client)
+            {
+                try
+                {
+                    await using var proxy = new SslStream(client.GetStream());
+                    await proxy.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = ProxyCertificate.Value });
+                    while (await ReadRequestLineAsync(proxy) is { } requestLine)
+                    {
+                        Requests.Enqueue(requestLine);
+                        if (requestLine.StartsWith("CONNECT ", StringComparison.Ordinal))
+                        {
+                            await WriteAsync(proxy, "HTTP/1.1 200 Connection established\r\n\r\n");
+                            await using var site = new SslStream(proxy, leaveInnerStreamOpen: true);
+                            await site.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = SiteCertificate.Value });
+                            if (await ReadRequestLineAsync(site) != null) await WriteAsync(site, Page);
+                            return;
+                        }
+                        await WriteAsync(proxy, Page);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or AuthenticationException or ObjectDisposedException)
+                {
+                    // the client went away, or turned a certificate down
+                }
+            }
+        }
+
+        /// <summary>The request line of the next request, its other headers skipped; null when the client is gone.</summary>
+        private static async Task<string?> ReadRequestLineAsync(Stream stream)
+        {
+            var head = new StringBuilder();
+            var one = new byte[1];
+            while (head.Length < 4 || head[^4] != '\r' || head[^3] != '\n' || head[^2] != '\r' || head[^1] != '\n')
+            {
+                if (await stream.ReadAsync(one) == 0) return null;
+                head.Append((char)one[0]);
+            }
+            var text = head.ToString();
+            return text[..text.IndexOf("\r\n", StringComparison.Ordinal)];
+        }
+
+        private static async Task WriteAsync(Stream stream, string text)
+        {
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(text));
+            await stream.FlushAsync();
+        }
+
+        private static X509Certificate2 SelfSigned(string name)
+        {
+            using var key = RSA.Create(2048);
+            var request = new CertificateRequest($"CN={name}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            var names = new SubjectAlternativeNameBuilder();
+            names.AddDnsName(name);
+            request.CertificateExtensions.Add(names.Build());
+            using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            return X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentType.Pfx), null);     // SChannel wants a stored key
+        }
+
+        public void Dispose() => _listener.Stop();
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_HttpsProxyWithACertificateOfAnotherName_WorksOnlyWithAcceptAnyProxyCertificate()
+    {
+        using var tls = new FakeTlsProxy();
+        var line = $"https://127.0.0.1:{tls.Port}";
+
+        using (var strict = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = new ProxyList([line]) }))
+        {
+            var error = await Assert.ThrowsAsync<HttpRequestException>(() => strict.LoadAsync($"http://{Site}/p/1", CancellationToken.None));
+            Assert.IsInstanceOfType<AuthenticationException>(error.InnerException);
+        }
+        Assert.HasCount(0, tls.Requests);
+
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = new ProxyList([line]), AcceptAnyProxyCertificate = true });
+        var page = await loader.LoadAsync($"http://{Site}/p/1", CancellationToken.None);
+
+        Assert.AreEqual(200, page.StatusCode);
+        Assert.AreEqual($"GET http://{Site}/p/1 HTTP/1.1", tls.Requests.Single());
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Loader_AcceptAnyProxyCertificate_StillChecksTheSitesCertificate()
+    {
+        using var tls = new FakeTlsProxy();
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions
+        {
+            Proxies = new ProxyList([$"https://127.0.0.1:{tls.Port}"]),
+            AcceptAnyProxyCertificate = true,
+        });
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => loader.LoadAsync($"https://{Site}/p/1", CancellationToken.None));
+
+        Assert.AreEqual($"CONNECT {Site}:443 HTTP/1.1", tls.Requests.Single());     // the proxy's certificate was taken
+        Assert.IsInstanceOfType<AuthenticationException>(error.InnerException);      // the site's self-signed one was not
     }
 
     [TestMethod]

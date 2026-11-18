@@ -243,9 +243,12 @@ its own connections and cookies. A line without a scheme is an http proxy. `sock
 proxy resolve the site's name, as socks4a does (socks4 gets an address resolved here). A login may hold any character;
 before `@` it may also be URL-encoded (`%40` for `@`).
 
-`https://` is TLS to the proxy itself, and the proxy's certificate must be valid for its name. What proxy sellers call an
-"HTTPS proxy" is usually a plain http proxy that tunnels https pages with CONNECT: write it as `http://`. An http proxy
-that cannot CONNECT loads http pages only.
+`https://` is TLS to the proxy itself, and the proxy's certificate must be valid for its name. A proxy reached by its IP
+address often shows a certificate of a host name, or a self-signed one: `AcceptAnyProxyCertificate = true` takes any
+certificate from https proxies, while the sites' certificates are checked as always. Such TLS only hides the traffic from
+listeners: as with an http proxy, someone in the middle could pose as the proxy and see its login and the http pages.
+What proxy sellers call an "HTTPS proxy" is usually a plain http proxy that tunnels https pages with CONNECT: write it as
+`http://`. An http proxy that cannot CONNECT loads http pages only.
 
 Proxies are given out in turn. When a site blocks an answer, the proxy that loaded it rests for that site only, as
 `ProxyBlockPolicy` says: `Ignore`, `Block10Minutes`, `Block1Hour` (the default), `Block1Day` or `Remove`.

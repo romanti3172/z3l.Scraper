@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Security;
 using System.Runtime.CompilerServices;
 
 namespace z3l.Scraper.Loading;
@@ -36,6 +37,15 @@ public sealed class HttpPageLoaderOptions
     /// socks5 proxies, with or without a login (<see cref="ProxyAddress.TryParse"/>). Every proxy has its own connections and cookies.
     /// </summary>
     public ProxyList? Proxies { get; set; }
+
+    /// <summary>
+    /// https proxies (TLS to the proxy): take the proxy's certificate whatever it is, issued for another name (a proxy reached by its
+    /// IP address), self-signed or expired; the sites' certificates are checked as always. The TLS to such a proxy only hides the
+    /// traffic from listeners: as with an http proxy, someone in the middle could pose as the proxy and see its login and the http
+    /// pages, while https pages stay encrypted up to the site. For <see cref="Proxies"/> and a <see cref="WebProxy"/> in
+    /// <see cref="Proxy"/>.
+    /// </summary>
+    public bool AcceptAnyProxyCertificate { get; set; }
 
     /// <summary>Keep cookies between requests (one cookie jar for the loader, or one per proxy).</summary>
     public bool UseCookies { get; set; } = true;
@@ -166,6 +176,13 @@ public sealed class HttpPageLoader : IBlockAwarePageLoader, IDisposable
         if (proxy != null)
         {
             handler.Proxy = proxy;     // without it the system proxy (HTTP_PROXY, Windows settings) is used
+        }
+        if (_options.AcceptAnyProxyCertificate && (proxy as WebProxy)?.Address is { Scheme: "https" } address)
+        {
+            // one callback checks the TLS to the proxy and the TLS to the sites inside it: they differ by the host they are for
+            var proxyHost = address.IdnHost.Trim('[', ']');
+            handler.SslOptions.RemoteCertificateValidationCallback = (sender, _, _, errors) => errors == SslPolicyErrors.None
+                || sender is SslStream { TargetHostName: { } host } && string.Equals(host.Trim('[', ']'), proxyHost, StringComparison.OrdinalIgnoreCase);
         }
         return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };   // the scraper applies RequestTimeout
     }
