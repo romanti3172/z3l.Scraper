@@ -85,9 +85,10 @@ public sealed class ScraperOptions
     public string RobotsUserAgent { get; set; } = "z3l-scraper";
 
     /// <summary>
-    /// File that keeps the run state: the requests not finished yet and the keys of the pages already seen. It is written every
-    /// <see cref="StateSaveInterval"/> and when the run stops; a run started with an existing file continues where the last one
-    /// stopped; the file is deleted when a run has finished all its pages and the consumer has taken all the items.
+    /// File that keeps the run state: the requests not finished yet. Next to it, <c>{StatePath}.seen</c> keeps the pages already seen,
+    /// a 16-byte hash of each key (<see cref="ScrapeRequest.UniqueKey"/>), and every save only appends the new ones. They are written
+    /// every <see cref="StateSaveInterval"/> and when the run stops; a run started with an existing file continues where the last one
+    /// stopped; both files are deleted when a run has finished all its pages and the consumer has taken all the items.
     /// <para>
     /// A page leaves the file only when its items are taken: an item counts as taken when the <c>await foreach</c> loop asks for
     /// the next one, so save each item in the loop body. Pages in work or not taken when the process died are done again, so

@@ -34,11 +34,15 @@ internal sealed class ScraperRun : IAsyncDisposable
     }
 
     // guarded by lock (_seen): what was seen, what is pending, how many were accepted (one consistent picture for the state file).
+    // _seen keeps the hashes of the request keys, 16 bytes a page whatever its URL and body.
     // _unsaved holds, with a state file only, the requests not finished plus the finished ones whose items the consumer has not taken:
     // if the process dies, all of them are done again (at least once)
-    private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+    // _seenUnsaved holds, with a state file only, the hashes seen since the last save: the next save appends them to the journal
+    private readonly HashSet<KeyHash> _seen = new();
+    private readonly List<KeyHash> _seenUnsaved = new();
     private readonly ConcurrentDictionary<ScrapeRequest, byte> _unsaved = new(ReferenceEqualityComparer.Instance);
     private int _accepted;
+    private long _seenStored;       // hashes the journal holds; changed by the saves, under _saveLock
 
     private readonly ConcurrentDictionary<string, EffectiveRules> _rules = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<FailedRequest> _failed = new();
@@ -191,11 +195,12 @@ internal sealed class ScraperRun : IAsyncDisposable
         var depth = parent == null ? 0 : parent.Depth + 1;
         // own copy: the caller may reuse its instance
         request = request with { Url = url, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
-        var key = request.SkipDuplicateCheck ? null : request.GetUniqueKey();
+        // hashed before the lock: the SHA-256 of a long POST body takes a while
+        KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey());
 
         lock (_seen)
         {
-            if (key != null && _seen.Contains(key))
+            if (key.HasValue && _seen.Contains(key.Value))
             {
                 Stats.AddDuplicate();
                 return false;
@@ -214,7 +219,11 @@ internal sealed class ScraperRun : IAsyncDisposable
                 return false;
             }
 
-            if (key != null) _seen.Add(key);
+            if (key.HasValue)
+            {
+                _seen.Add(key.Value);
+                if (_statePath != null) _seenUnsaved.Add(key.Value);
+            }
             _accepted++;
             if (_statePath != null) _unsaved.TryAdd(request, 0);
             Interlocked.Increment(ref _pending);
@@ -898,13 +907,16 @@ internal sealed class ScraperRun : IAsyncDisposable
 
     private void RestoreState(string path)
     {
-        var snapshot = RunState.Load(path, _codec!);
+        RunState.Saved run;
         lock (_seen)
         {
-            foreach (var key in snapshot.Seen) _seen.Add(key);
+            run = RunState.Load(path, _codec!, _seen);
+            // a file of version 1 kept the keys themselves: the first save puts their hashes into the journal
+            if (run.Stored == 0) _seenUnsaved.AddRange(_seen);
         }
+        _seenStored = run.Stored;
 
-        foreach (var saved in snapshot.Pending)
+        foreach (var saved in run.Pending)
         {
             if (!UrlHelper.TryNormalize(saved.Url, out var url))
             {
@@ -929,15 +941,7 @@ internal sealed class ScraperRun : IAsyncDisposable
             Push(request);
         }
 
-        Logger.LogInformation("Continuing the run saved in {Path}: {Pending} requests to finish, {Seen} pages seen", path, Stats.Restored, snapshot.Seen.Count);
-    }
-
-    private RunState.Snapshot TakeSnapshot()
-    {
-        lock (_seen)
-        {
-            return new RunState.Snapshot([.. _seen], [.. _unsaved.Keys]);
-        }
+        Logger.LogInformation("Continuing the run saved in {Path}: {Pending} requests to finish, {Seen} pages seen", path, Stats.Restored, _seen.Count);
     }
 
     private async Task SaveLoopAsync(CancellationToken token)
@@ -954,9 +958,21 @@ internal sealed class ScraperRun : IAsyncDisposable
         await _saveLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            var snapshot = TakeSnapshot();
-            await Task.Run(() => RunState.Save(_statePath!, snapshot, _codec!)).ConfigureAwait(false);
-            Logger.LogDebug("State saved to {Path}: {Pending} pending, {Seen} seen", _statePath, snapshot.Pending.Count, snapshot.Seen.Count);
+            // one consistent picture: the pages seen and the requests not finished at one moment
+            KeyHash[] seen;
+            ScrapeRequest[] pending;
+            lock (_seen)
+            {
+                seen = [.. _seenUnsaved];
+                pending = [.. _unsaved.Keys];
+            }
+            var stored = _seenStored;
+            await Task.Run(() => RunState.Save(_statePath!, stored, seen, pending, _codec!)).ConfigureAwait(false);
+
+            // in the journal now; the hashes seen meanwhile wait for the next save
+            lock (_seen) _seenUnsaved.RemoveRange(0, seen.Length);
+            _seenStored = stored + seen.Length;
+            Logger.LogDebug("State saved to {Path}: {Pending} pending, {Seen} seen", _statePath, pending.Length, _seenStored);
         }
         catch (Exception ex)
         {
@@ -996,11 +1012,11 @@ internal sealed class ScraperRun : IAsyncDisposable
     {
         try
         {
-            File.Delete(_statePath!);
+            RunState.Delete(_statePath!);
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "The state file {Path} of the finished run could not be deleted", _statePath);
+            Logger.LogError(ex, "The state file {Path} of the finished run or its journal could not be deleted", _statePath);
         }
     }
 

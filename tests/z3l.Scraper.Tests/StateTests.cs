@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using z3l.FastHtmlParser;
@@ -25,6 +27,32 @@ public sealed class StateTests
     }
 
     private string StatePath => Path.Combine(_directory, "state", "run.json");
+    private string SeenPath => StatePath + ".seen";
+
+    /// <summary>What the journal keeps for a key: the first 16 bytes of the SHA-256 of its UTF-8, in hex.</summary>
+    private static string Hash(string key) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)), 0, 16);
+
+    private static byte[] HashBytes(string key) => SHA256.HashData(Encoding.UTF8.GetBytes(key))[..16];
+
+    private List<string> JournalHashes() => [.. File.ReadAllBytes(SeenPath).Chunk(16).Select(x => Convert.ToHexStringLower(x))];
+
+    /// <summary>A run of the chain from /0 that stops on /<paramref name="stop"/>, whose load never ends: that page stays in the state file.</summary>
+    private async Task<int[]> RunUntilStuck(int stop)
+    {
+        var loader = new DelegateLoader(async (r, token) =>
+        {
+            var n = int.Parse(r.Url[(r.Url.LastIndexOf('/') + 1)..]);
+            if (n == stop) await Task.Delay(Timeout.Infinite, token);
+            return PageResponse.FromText(200, r.Url, ScraperTests.Html($"<a href='/{n + 1}'>next</a>"));
+        });
+        var options = Options();
+        options.MaxRunDuration = TimeSpan.FromMilliseconds(300);
+        var result = await ChainScraper(loader, options).RunToListAsync("https://s.test/0");
+        Assert.IsTrue(File.Exists(StatePath), "the stopped run must leave its state");
+        return [.. result.Items.Cast<int>()];
+    }
+
+    private static string[] HashesOf(params int[] pages) => [.. pages.Select(n => Hash($"GET https://s.test/{n}"))];
 
     private ScraperOptions Options(int concurrency = 1)
     {
@@ -58,6 +86,7 @@ public sealed class StateTests
 
         Assert.HasCount(10, result.Items);
         Assert.IsFalse(File.Exists(StatePath));
+        Assert.IsFalse(File.Exists(SeenPath));
     }
 
     [TestMethod]
@@ -239,5 +268,119 @@ public sealed class StateTests
         var error = await Assert.ThrowsExactlyAsync<NotSupportedException>(() =>
             scraper.RunToListAsync(ScrapeRequest.For("https://s.test/p/1", PageType.Item, new Teaser("1", []))));
         StringAssert.Contains(error.Message, "StateJson");
+    }
+
+    // ------------------------------------------------------------------ the pages seen: hashes in a journal
+
+    [TestMethod]
+    public void KeyHash_IsTheStartOfTheSha256OfTheKey()
+    {
+        // the last one, a big POST body, is hashed from a rented buffer
+        foreach (var key in new[] { "GET https://s.test/0", "POST https://s.test/p a=1&b=текст", "POST https://s.test/p " + new string('я', 5000) })
+        {
+            var hash = KeyHash.Of(key);
+            Assert.AreEqual(Hash(key), hash.ToString());
+            var bytes = new byte[KeyHash.Size];
+            hash.Write(bytes);
+            CollectionAssert.AreEqual(HashBytes(key), bytes);
+            Assert.AreEqual(hash, KeyHash.Read(bytes));
+        }
+        Assert.AreNotEqual(KeyHash.Of("GET https://s.test/p"), KeyHash.Of("POST https://s.test/p"));
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task SeenPages_AreHashesInTheJournal_NotKeysInTheStateFile()
+    {
+        CollectionAssert.AreEquivalent(new[] { 0, 1, 2 }, await RunUntilStuck(3));
+
+        using (var state = JsonDocument.Parse(await File.ReadAllBytesAsync(StatePath)))
+        {
+            Assert.AreEqual(2, state.RootElement.GetProperty("version").GetInt32());
+            Assert.AreEqual(4, state.RootElement.GetProperty("seenCount").GetInt64());     // /0 to /3; /3 never loaded, so no /4
+        }
+        CollectionAssert.AreEquivalent(HashesOf(0, 1, 2, 3), JournalHashes());
+
+        // a page done and taken is a hash now; only the request not finished is in the state file
+        var text = await File.ReadAllTextAsync(StatePath);
+        Assert.IsFalse(text.Contains("https://s.test/0", StringComparison.Ordinal));
+        StringAssert.Contains(text, "https://s.test/3");
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task JournalTail_ThatTheStateFileDoesNotCount_IsIgnoredAndWrittenOver()
+    {
+        await RunUntilStuck(3);
+        // a process that died after appending to the journal and before writing the state file: a hash of /5, which no run has
+        // done yet, and half of one more
+        await File.AppendAllBytesAsync(SeenPath, [.. HashBytes("GET https://s.test/5"), 1, 2, 3, 4, 5, 6, 7]);
+
+        // /5 is done, not skipped as seen; the save writes over the tail
+        AssertDone(await RunUntilStuck(7), [3, 4, 5, 6], lastOfTheRunBefore: 2);
+        using (var state = JsonDocument.Parse(await File.ReadAllBytesAsync(StatePath)))
+        {
+            Assert.AreEqual(8, state.RootElement.GetProperty("seenCount").GetInt64());
+        }
+        Assert.AreEqual(8 * 16, new FileInfo(SeenPath).Length);
+        CollectionAssert.AreEquivalent(HashesOf(0, 1, 2, 3, 4, 5, 6, 7), JournalHashes());
+
+        var result = await ChainScraper(Chain(new ConcurrentDictionary<int, int>()), Options()).RunToListAsync("https://s.test/0");
+        AssertDone([.. result.Items.Cast<int>()], [7, 8, 9], lastOfTheRunBefore: 6);
+        Assert.IsFalse(File.Exists(StatePath));
+        Assert.IsFalse(File.Exists(SeenPath));
+    }
+
+    /// <summary>
+    /// A run that continues a stopped one did <paramref name="expected"/>, and may have done the last page of the run before again:
+    /// a run stopped by its time limit saves the state before the consumer asks for one more item, so that page counts as not taken.
+    /// </summary>
+    private static void AssertDone(int[] items, int[] expected, int lastOfTheRunBefore)
+    {
+        CollectionAssert.IsSubsetOf(expected, items);
+        CollectionAssert.IsSubsetOf(items, expected.Append(lastOfTheRunBefore).ToArray());
+        Assert.HasCount(items.Distinct().Count(), items, "no page twice in one run");
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task StateFileOfVersion1_IsContinued()
+    {
+        // 0.1.0-preview.7 and earlier kept the keys themselves in the state file
+        Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
+        await File.WriteAllTextAsync(StatePath, """
+            {"format":"z3l.Scraper state","version":1,"savedAt":"2026-11-17T10:00:00+00:00",
+             "seen":["GET https://s.test/0","GET https://s.test/1","GET https://s.test/6"],
+             "pending":[{"url":"https://s.test/1","label":"default","depth":1}]}
+            """);
+
+        // the first save writes the hashes of the old keys into the journal, with the new ones
+        CollectionAssert.AreEquivalent(new[] { 1, 2, 3 }, await RunUntilStuck(4));
+        using (var state = JsonDocument.Parse(await File.ReadAllBytesAsync(StatePath)))
+        {
+            Assert.AreEqual(2, state.RootElement.GetProperty("version").GetInt32());
+        }
+        CollectionAssert.AreEquivalent(HashesOf(0, 1, 6, 2, 3, 4), JournalHashes());
+
+        // /6, seen by the run of the old version, is still a duplicate: the chain ends before it
+        var loads = new ConcurrentDictionary<int, int>();
+        var result = await ChainScraper(Chain(loads), Options()).RunToListAsync("https://s.test/0");
+        AssertDone([.. result.Items.Cast<int>()], [4, 5], lastOfTheRunBefore: 3);
+        Assert.IsFalse(loads.ContainsKey(6));
+        Assert.IsFalse(File.Exists(StatePath));
+        Assert.IsFalse(File.Exists(SeenPath));
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task MissingJournal_IsAnError_NotASilentRestart()
+    {
+        await RunUntilStuck(3);
+        File.Delete(SeenPath);
+
+        var scraper = ChainScraper(Chain(new ConcurrentDictionary<int, int>()), Options());
+        var error = await Assert.ThrowsExactlyAsync<InvalidDataException>(() => scraper.RunToListAsync("https://s.test/0"));
+        StringAssert.Contains(error.Message, "run.json.seen holds 0 hashes");
+        StringAssert.Contains(error.Message, "counts 4");
     }
 }
