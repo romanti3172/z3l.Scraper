@@ -102,6 +102,13 @@ public sealed record ScrapeRequest
     /// <summary>Link depth: 0 for start requests, one more than the page whose handler queued it.</summary>
     public int Depth { get; internal set; }
 
+    /// <summary>
+    /// URL of the page whose handler queued this request, after the redirects of that page; null for start requests and for those of
+    /// <see cref="Scraper.RequestsNeeded"/>. <see cref="Loading.StealthHttpPageLoader"/> makes the Referer of it, as a browser does, and
+    /// it shows where a broken link was found.
+    /// </summary>
+    public string? ParentUrl { get; internal set; }
+
     internal int NotFoundCount { get; set; }
 
     /// <summary>The request already holds a load slot of its throttled host (it waited in the host's line).</summary>

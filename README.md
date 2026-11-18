@@ -31,7 +31,8 @@ rotating proxies, rate and time limits, and streaming results while the scraping
   filling the memory.
 - **Requests as they are needed.** A big table of URLs is read a batch at a time when the run is low on requests
   (`RequestsNeeded`), not loaded into memory at once.
-- **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser or anything else.
+- **Pluggable loaders.** `HttpPageLoader` and `StealthHttpPageLoader` (HTTP/2 and the headers of a browser) are built in;
+  derive from `BlockAwarePageLoader` for a browser or anything else, and get the proxy rotation with it.
 - **Cache and snapshots.** Pages the handlers took are kept and given back, so you work on handlers without loading the
   site each time; pages that were blocked, missing or broken are saved, so you see what the site answered.
 - **One page through its handler.** `ParseAsync` loads a page, or takes a saved one, and runs its handler without
@@ -181,7 +182,7 @@ await foreach (var item in scraper.RunAsync()) { ... }
 ```csharp
 scraper.Route(PageType.Item, async ctx =>
 {
-    ctx.Request;               // the request (Url, Label, Data, Depth, Attempts...)
+    ctx.Request;               // the request (Url, Label, Data, Depth, ParentUrl: the page it was found on, Attempts...)
     ctx.Response;              // StatusCode, Url after redirects, Body, Text, Headers
     ctx.Html;                  // parsed page (z3l.FastHtmlParser), made on first use
     ctx.Json<Product>();       // body as JSON; Json(MyJsonContext.Default.Product) for AOT
@@ -577,38 +578,72 @@ using var loader = new HttpPageLoader(new HttpPageLoaderOptions
     MaxResponseBytes = 10 * 1024 * 1024,                   // bigger responses fail without retries
 });
 
+// asks for pages the way a browser does: HTTP/2, the browser's headers in its order, Referer
+using var loader = new StealthHttpPageLoader(new StealthHttpPageLoaderOptions
+{
+    Proxies = ProxyList.FromFile("proxies.txt"),
+    UserAgents = UserAgentList.FromFile("useragents.txt"), // one per proxy; Chrome, Edge, Firefox and Safari get their own headers
+    AcceptLanguage = "de-DE,de;q=0.9",
+});
+
 // or your own client (IHttpClientFactory, Polly...)
 var loader = new HttpPageLoader(httpClient);
 
 // or a headless browser: the z3l.Scraper.Playwright package
 await using var loader = new PlaywrightPageLoader(new PlaywrightPageLoaderOptions { Channel = "chrome", WaitForSelector = "div.product" });
-
-// or anything else
-public sealed class BrowserLoader : IBlockAwarePageLoader
-{
-    public async Task<PageResponse> LoadAsync(ScrapeRequest request, CancellationToken cancellationToken)
-    {
-        var html = await ...;
-        return PageResponse.FromText(200, finalUrl, html);
-    }
-
-    public void ReportBlocked(ScrapeRequest request, PageResponse response, string reason)
-    {
-        // retire the proxy / browser session that got this response
-    }
-
-    // optional: the response was not the page (failed the checks, a 5xx, the handler asked for a retry) / it was the page /
-    // the last load of the request ran out of RequestTimeout
-    public void ReportBadResponse(ScrapeRequest request, PageResponse response, string reason) { }
-    public void ReportGoodResponse(ScrapeRequest request, PageResponse response) { }
-    public void ReportTimeout(ScrapeRequest request) { }
-}
 ```
 
 A loader returns any HTTP status as a normal result and throws only when there is no response; the scraper
-retries that. A loader throws `NonRetryableException` when another attempt cannot help. A loader of your own can
-rotate proxies with `ProxyList` too: `AcquireAsync(host)` gives the next proxy that may load from the site, and
-`ReportSuccess`, `ReportFailure`, `ReportBlocked`, `ReportBadResponse` and `ReportGoodResponse` tell the list how it went.
+retries that. A loader throws `NonRetryableException` when another attempt cannot help.
+
+`HttpPageLoader` sends the request as it is, over HTTP/1.1. `StealthHttpPageLoader` asks for it the way a browser does:
+- over HTTP/2, falling back to HTTP/1.1 where the server has no HTTP/2 (and on http:// sites);
+- with the headers of the browser of the user agent, in its order. Chrome and Edge send client hints (`sec-ch-ua` with the
+  brands Chromium makes for the version, `sec-ch-ua-mobile`, `sec-ch-ua-platform`), the Accept of Chrome,
+  `Upgrade-Insecure-Requests`, `Sec-Fetch-*` and `Priority`. Firefox and Safari send theirs, without client hints, and every
+  browser on iOS asks as Safari. Other Chromium browsers (Opera, Yandex) get Chrome's headers without client hints.
+- a page is asked for as a navigation, a request of `PageType.Api` as `fetch()` from the page it was found on;
+- `Referer` and `Sec-Fetch-Site` come from `ScrapeRequest.ParentUrl`, the page the link was found on, by the browsers'
+  default policy: the whole URL to the same origin, the origin elsewhere, nothing from https to http.
+
+A header of `DefaultHeaders` or of the request replaces the browser's header of the same name in its place, and a
+User-Agent there is the browser to look like. The TLS handshake and the HTTP/2 settings stay those of .NET, which a strong
+anti-bot that reads JA3/JA4 tells from a browser's: for such sites use a browser, or a TLS library through `CreateHandler`.
+
+### Loaders of your own
+
+```
+BlockAwarePageLoader            rotating proxies, a user agent per proxy, Report… to ProxyList
+ └─ HttpClientPageLoader        HttpClient per proxy with its cookies, CreateHandler, CreateMessage, the body limit
+     ├─ HttpPageLoader          the request as it is
+     └─ StealthHttpPageLoader   the way a browser asks
+```
+
+```csharp
+// a loader of anything (a browser, curl...): BlockAwarePageLoader takes the proxy of every load and tells the list how it did
+public sealed class CurlLoader(ProxyList proxies) : BlockAwarePageLoader(proxies, userAgents: null, userAgent: "Mozilla/5.0 ...")
+{
+    protected override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, ProxyList.Entry? proxy,
+        string? userAgent, CancellationToken cancellationToken)
+    {
+        var html = await ...;                              // through proxy.Address
+        return PageResponse.FromText(200, finalUrl, html);
+    }
+}
+
+// HttpClient with a handler of your own: Polly, logging, signed requests, a TLS library, another outgoing address
+public sealed class RetryingLoader(StealthHttpPageLoaderOptions options) : StealthHttpPageLoader(options)
+{
+    protected override HttpMessageHandler CreateHandler(IWebProxy? proxy) => new MyDelegatingHandler(base.CreateHandler(proxy));
+}
+```
+
+`BlockAwarePageLoader` hears from the scraper which responses were blocked (`ReportBlocked`), which were not the page
+(they failed the checks, a 5xx, the handler asked for a retry: `ReportBadResponse`), which were (`ReportGoodResponse`) and
+which loads ran out of `RequestTimeout` (`ReportTimeout`), and passes that on to the proxy that loaded them; override these
+to retire a browser session too. A loader can also implement `IPageLoader` or `IBlockAwarePageLoader` itself and rotate
+proxies with `ProxyList`: `AcquireAsync(host)` gives the next proxy that may load from the site, and `ReportSuccess`,
+`ReportFailure`, `ReportBlocked`, `ReportBadResponse` and `ReportGoodResponse` tell the list how it went.
 
 [z3l.Scraper.Playwright](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Playwright/README.md) loads pages in Chromium, Firefox or WebKit, with a
 browser context per proxy.

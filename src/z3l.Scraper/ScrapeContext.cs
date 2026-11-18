@@ -152,8 +152,9 @@ public sealed class ScrapeContext
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfCompleted();
 
-        if (!UrlHelper.TryResolve(Response.Url, request.Url, out var absolute)) return false;
-        return _host.Enqueue(absolute == request.Url ? request : request with { Url = absolute }, parent: Request);
+        var page = Response.Url;
+        if (!UrlHelper.TryResolve(page, request.Url, out var absolute)) return false;
+        return _host.Enqueue(request with { Url = absolute, ParentUrl = page }, parent: Request);
     }
 
     /// <summary>The loaded page read as a sitemap: XML (urlset or sitemapindex), gzipped or not, or a text list of URLs.</summary>

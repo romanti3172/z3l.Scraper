@@ -195,6 +195,29 @@ public sealed class StateTests
     }
 
     [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task ParentUrl_SurvivesTheRestart()
+    {
+        // the listing is handled and redirected; the item it found never loads and stays in the state file
+        var first = new DelegateLoader(async (r, token) =>
+        {
+            if (r.Url.EndsWith("/item", StringComparison.Ordinal)) await Task.Delay(Timeout.Infinite, token);
+            return PageResponse.FromText(200, r.Url + "?moved", "x");
+        });
+        var options = Options(concurrency: 2);
+        options.MaxRunDuration = TimeSpan.FromMilliseconds(300);
+        await new Scraper(first, options).Route("default", ctx => ctx.Enqueue("/item")).RunToListAsync("https://s.test/list");
+        Assert.IsTrue(File.Exists(StatePath));
+        StringAssert.Contains(await File.ReadAllTextAsync(StatePath), "parentUrl");
+
+        var fast = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, "x")));
+        var parents = new ConcurrentQueue<string?>();
+        await new Scraper(fast, Options()).Route("default", ctx => parents.Enqueue(ctx.Request.ParentUrl)).RunToListAsync();
+
+        CollectionAssert.AreEqual(new[] { "https://s.test/list?moved" }, parents.ToArray());
+    }
+
+    [TestMethod]
     public async Task UnsupportedUserData_IsRefusedAtOnce()
     {
         var scraper = new Scraper(new FakeLoader(), Options()).Route("default", _ => { });
