@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -293,6 +295,58 @@ public sealed class ZyteApiTests
         StringAssert.Contains(FailureOf("https://shop.test/suspended").Message, "suspended");
 
         FailedRequest FailureOf(string url) => result.Failed.Single(f => f.Request.Url == url);
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Limits_AreRetriedAfterTheirRetryAfter_WithoutAnAttempt()
+    {
+        var calls = new ConcurrentQueue<(string Url, long At)>();
+        var zyte = new FakeZyte(call =>
+        {
+            calls.Enqueue((call.Url, Stopwatch.GetTimestamp()));
+            var before = calls.Count(c => c.Url == call.Url) - 1;
+            return (call.Url, before) switch
+            {
+                ("https://shop.test/busy", < 2) => Limited(Problem(429, "/limits/over-user-limit", "Too many requests.")),
+                ("https://shop.test/overloaded", 0) => Limited(Problem(503, "/limits/over-global-limit", "The service is overloaded.")),
+                _ => Answer(call, Html("ok")),
+            };
+        });
+        await using var loader = new ZyteApiPageLoader(Options(zyte));
+        var scraperOptions = FastScraper();     // no retry delay of its own
+        scraperOptions.MaxRetries = 0;          // an attempt more would fail the page
+        var scraper = new Scraper(loader, scraperOptions).Route("default", ctx => ctx.Emit($"{ctx.Request.Url} {ctx.Request.Attempts}"));
+
+        var result = await scraper.RunToListAsync("https://shop.test/busy", "https://shop.test/overloaded");
+
+        CollectionAssert.AreEquivalent(new[] { "https://shop.test/busy 1", "https://shop.test/overloaded 1" }, result.Items.ToArray(),
+            "Zyte API's limits took no attempt");
+        Assert.HasCount(3, Times("https://shop.test/busy"));
+        Assert.HasCount(2, Times("https://shop.test/overloaded"));
+        foreach (var url in new[] { "https://shop.test/busy", "https://shop.test/overloaded" })
+        {
+            var times = Times(url);
+            for (var i = 1; i < times.Length; i++)
+            {
+                Assert.IsGreaterThanOrEqualTo(900, Stopwatch.GetElapsedTime(times[i - 1], times[i]).TotalMilliseconds, $"{url}: Retry-After 1 s");
+            }
+        }
+        Assert.AreEqual(3, result.Stats.RateLimited);
+        CollectionAssert.AreEquivalent(new[]
+        {
+            "Zyte API limits the calls (429 /limits/over-user-limit): Too many requests.",
+            "Zyte API limits the calls (503 /limits/over-global-limit): The service is overloaded.",
+        }, result.Stats.Reasons.Select(r => r.Reason).ToArray(), "Stats.Reasons tells the limits apart");
+        Assert.IsTrue(result.Stats.Reasons.All(r => r.Kind == ReasonKind.RateLimited && r.Failed == 0));
+
+        long[] Times(string url) => [.. calls.Where(c => c.Url == url).Select(c => c.At)];
+
+        static HttpResponseMessage Limited(HttpResponseMessage answer)
+        {
+            answer.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(1));
+            return answer;
+        }
     }
 
     [TestMethod]

@@ -58,6 +58,11 @@ public enum ReasonKind
     DisallowedByRobotsTxt,
     /// <summary>The URL of a request given by a <see cref="Scraper.RequestsNeeded"/> handler is not an absolute http(s) URL.</summary>
     BadUrl,
+    /// <summary>
+    /// A scraping service refused the load for its limits (<see cref="Loading.RemoteLoadException.RateLimited"/>): retried without an
+    /// attempt, up to <see cref="ScraperOptions.RateLimitRetries"/> times.
+    /// </summary>
+    RateLimited,
 }
 
 /// <summary>
@@ -68,7 +73,8 @@ public enum ReasonKind
 /// <param name="Reason">
 /// The reason, the same for every attempt of the group: the check that failed (<c>status 403</c>, <c>marker "captcha"</c>,
 /// <c>no "price"</c>), the timeout, the kind of a load error (<c>ConnectionError</c>, <c>ProxyTunnelError</c>), the type of the
-/// exception a handler threw, or the message of a <see cref="RetryRequestException"/> or <see cref="NonRetryableException"/>.
+/// exception a handler threw, or the message of a <see cref="RetryRequestException"/>, of a <see cref="NonRetryableException"/> or
+/// of a service's refusal for its limits.
 /// </param>
 /// <param name="Label">Label of the requests; empty in the "other reasons" group.</param>
 /// <param name="Host">Host of the requests, with the port when it is not the default one; empty in the "other reasons" group.</param>
@@ -99,6 +105,7 @@ public sealed record ReasonCount(ReasonKind Kind, string Reason, string Label, s
         ReasonKind.NonRetryable => "non-retryable",
         ReasonKind.DisallowedByRobotsTxt => "robots.txt",
         ReasonKind.BadUrl => "bad url",
+        ReasonKind.RateLimited => "rate limited",
         _ => kind.ToString(),
     };
 }
@@ -107,8 +114,8 @@ public sealed record ReasonCount(ReasonKind Kind, string Reason, string Label, s
 public sealed class ScraperStats
 {
     private readonly Stopwatch _clock = new();
-    private long _enqueued, _duplicates, _skipped, _outOfScope, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked, _items,
-        _inProgress, _queued;
+    private long _enqueued, _duplicates, _skipped, _outOfScope, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked,
+        _rateLimited, _items, _inProgress, _queued;
 
     /// <summary>
     /// Unique requests accepted. A request with a bad URL from <see cref="Scraper.RequestsNeeded"/> is counted here and in
@@ -126,7 +133,7 @@ public sealed class ScraperStats
     public long OutOfScope => Interlocked.Read(ref _outOfScope);
     /// <summary>Unfinished requests taken over from the state file of an earlier run (<see cref="ScraperOptions.StatePath"/>).</summary>
     public long Restored => Interlocked.Read(ref _restored);
-    /// <summary>Load attempts, retries included.</summary>
+    /// <summary>Load attempts, retries included, and the loads a scraping service refused for its limits (<see cref="RateLimited"/>).</summary>
     public long Loads => Interlocked.Read(ref _loads);
     /// <summary>
     /// Pages <see cref="Scraper.CachingPageLoader"/> gave instead of the loader, those that turned out not to be the page included
@@ -143,6 +150,12 @@ public sealed class ScraperStats
     public long Retries => Interlocked.Read(ref _retries);
     /// <summary>Responses recognised as blocked.</summary>
     public long Blocked => Interlocked.Read(ref _blocked);
+    /// <summary>
+    /// Loads a scraping service refused for its limits (<see cref="Loading.RemoteLoadException.RateLimited"/>): retried without an
+    /// attempt, up to <see cref="ScraperOptions.RateLimitRetries"/> times. They are in <see cref="Loads"/> too, and their retries in
+    /// <see cref="Retries"/>.
+    /// </summary>
+    public long RateLimited => Interlocked.Read(ref _rateLimited);
     /// <summary>Items handed to the consumer.</summary>
     public long Items => Interlocked.Read(ref _items);
     /// <summary>Requests being loaded or handled now.</summary>
@@ -229,6 +242,7 @@ public sealed class ScraperStats
     internal void AddNotFound() => Interlocked.Increment(ref _notFound);
     internal void AddRetry() => Interlocked.Increment(ref _retries);
     internal void AddBlocked() => Interlocked.Increment(ref _blocked);
+    internal void AddRateLimited() => Interlocked.Increment(ref _rateLimited);
     internal void AddItem() => Interlocked.Increment(ref _items);
     internal void ChangeInProgress(int delta) => Interlocked.Add(ref _inProgress, delta);
     internal void ChangeQueued(int delta) => Interlocked.Add(ref _queued, delta);
@@ -243,8 +257,9 @@ public sealed class ScraperStats
                       + (OutOfScope > 0 ? $", {OutOfScope} out of scope" : string.Empty)
                       + (Restored > 0 ? $", {Restored} restored" : string.Empty);
         var cached = FromCache > 0 ? $", {FromCache} from cache" : string.Empty;
+        var limited = RateLimited > 0 ? $", {RateLimited} rate limited" : string.Empty;
         return $"{Succeeded}/{Enqueued} done, {Failed} failed ({NotFound} not found), {Pending} pending " +
-               $"({Queued} queued, {InProgress} in progress), {Loads} loads{cached}, {Retries} retries, {Blocked} blocked, " +
+               $"({Queued} queued, {InProgress} in progress), {Loads} loads{cached}, {Retries} retries, {Blocked} blocked{limited}, " +
                $"{Items} items, {Duplicates} duplicates{skipped}, {time}, {rate:F1} pages/min";
     }
 }

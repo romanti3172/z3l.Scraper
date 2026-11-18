@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net;
 using z3l.Scraper.Loading;
 
 namespace z3l.Scraper.Tests;
@@ -20,6 +22,8 @@ public sealed class ServicePageLoaderTests
         public int MaxActive => Volatile.Read(ref _maxActive);
 
         protected override int MaxLevel => maxLevel;
+
+        public static TimeSpan? RetryAfterOfAnswer(HttpResponseMessage answer) => RetryAfterOf(answer);
 
         protected override async Task<PageResponse> CallAsync(HttpClient client, ScrapeRequest request, int level, CancellationToken cancellationToken)
         {
@@ -127,6 +131,51 @@ public sealed class ServicePageLoaderTests
         Assert.AreEqual(2, attempts[Url(2)], "a network error to the service is retried");
         Assert.AreEqual(1, attempts[Url(3)], "another call cannot help");
         Assert.AreEqual(FailureReason.NonRetryable, result.Failed.Single().Reason);
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task ARefusalForThePlansLimits_WaitsItsRetryAfter_AndTakesNoAttempt()
+    {
+        var calls = new ConcurrentQueue<long>();
+        await using var service = new FakeService(new ServicePageLoaderOptions(), (r, _, _) =>
+        {
+            calls.Enqueue(Stopwatch.GetTimestamp());
+            return calls.Count == 1
+                ? throw new RemoteLoadException("429: over the plan's limit") { RateLimited = true, RetryAfter = TimeSpan.FromMilliseconds(300) }
+                : Task.FromResult(Page(r));
+        });
+        var options = ScraperTests.FastOptions();
+        options.MaxRetries = 0;      // an attempt more would fail the page
+        var scraper = new Scraper(service, options).Route("default", ctx => ctx.Emit(ctx.Request.Attempts));
+
+        var result = await scraper.RunToListAsync(Url(1));
+
+        CollectionAssert.AreEqual(new object[] { 1 }, result.Items.ToArray(), "the refusal was no attempt");
+        var times = calls.ToArray();
+        Assert.HasCount(2, times);
+        Assert.IsGreaterThanOrEqualTo(270, Stopwatch.GetElapsedTime(times[0], times[1]).TotalMilliseconds, "as long as the service asked");
+        Assert.AreEqual(1, result.Stats.RateLimited);
+        StringAssert.Contains(service.ToString(), "failed remotely 1");
+        Assert.AreEqual(1, service.Credits, "the refused call cost nothing");
+    }
+
+    [TestMethod]
+    public void RetryAfterOf_ReadsSecondsAndDates()
+    {
+        Assert.AreEqual(TimeSpan.FromSeconds(7), FakeService.RetryAfterOfAnswer(Answer("7")));
+        Assert.IsTrue(FakeService.RetryAfterOfAnswer(Answer(DateTimeOffset.UtcNow.AddSeconds(30).ToString("r"))) is { TotalSeconds: > 25 and <= 31 });
+        Assert.AreEqual(TimeSpan.Zero, FakeService.RetryAfterOfAnswer(Answer("Wed, 21 Oct 2015 07:28:00 GMT")), "a date gone by");
+        Assert.IsNull(FakeService.RetryAfterOfAnswer(Answer("soon")));
+        using var none = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        Assert.IsNull(FakeService.RetryAfterOfAnswer(none));
+
+        static HttpResponseMessage Answer(string retryAfter)
+        {
+            var answer = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            answer.Headers.TryAddWithoutValidation("Retry-After", retryAfter);
+            return answer;
+        }
     }
 
     [TestMethod]

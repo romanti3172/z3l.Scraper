@@ -231,7 +231,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
 
         var depth = parent == null ? 0 : parent.Depth + 1;
         // own copy: the caller may reuse its instance
-        request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
+        request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, RateLimitCount = 0, Depth = depth, HasThrottleSlot = false,
+            SkipCache = false };
         // hashed before the lock: the SHA-256 of a long POST body takes a while
         KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey());
 
@@ -595,6 +596,12 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     Fail(request, FailureReason.NonRetryable, ex.Message, response?.StatusCode, ex);
                     return;
                 }
+                catch (RemoteLoadException ex) when (ex.RateLimited && !token.IsCancellationRequested)
+                {
+                    // no page for a handler: the retry is scheduled at once, without a handler slot
+                    RetryRateLimited(request, ex);
+                    return;
+                }
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
                     loadError = ex;
@@ -645,7 +652,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     Note(new Trouble(ReasonKind.NotFound, verdict.Reason!), request, failed: request.NotFoundCount > _options.NotFoundRetries);
                     if (request.NotFoundCount <= _options.NotFoundRetries)
                     {
-                        ScheduleRetry(request, verdict.Reason!, null);
+                        ScheduleRetry(request, verdict.Reason!, null, request.Attempts);
                     }
                     else
                     {
@@ -878,26 +885,56 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         Note(trouble, request, failed: request.Attempts > maxRetries);
         if (request.Attempts <= maxRetries)
         {
-            ScheduleRetry(request, reason, RetryAfter(response));
+            // the server's time: the Retry-After of the response, or of the service that had no page
+            ScheduleRetry(request, reason, RetryAfter(response) ?? (error as RemoteLoadException)?.RetryAfter, request.Attempts);
         }
         else
         {
-            Fail(request, reasonWhenOut, $"{request.Attempts} attempts, last: {reason}", response?.StatusCode, error);
+            var refused = request.RateLimitCount > 0 ? $", {request.RateLimitCount} more loads refused for the service's limits" : "";
+            Fail(request, reasonWhenOut, $"{request.Attempts} attempts{refused}, last: {reason}", response?.StatusCode, error);
         }
     }
 
-    private void ScheduleRetry(ScrapeRequest request, string reason, TimeSpan? retryAfter)
+    /// <summary>
+    /// A scraping service refused the load for its limits: the page was not tried. It is loaded again after the service's Retry-After,
+    /// and the retry takes none of its attempts, up to <see cref="ScraperOptions.RateLimitRetries"/> refusals of the request; past them
+    /// a refusal is an attempt like a load error, so the request ends even when the service refuses every call.
+    /// </summary>
+    private void RetryRateLimited(ScrapeRequest request, RemoteLoadException refusal)
+    {
+        Stats.AddRateLimited();
+        var trouble = new Trouble(ReasonKind.RateLimited, Short(refusal.Message), refusal.Message);
+        var reason = $"rate limited: {refusal.Message}";
+        if (request.RateLimitCount >= _options.RateLimitRetries)
+        {
+            RetryOrFail(request, trouble, reason, null, refusal);
+            return;
+        }
+
+        request.Attempts--;
+        request.RateLimitCount++;
+        Note(trouble, request, failed: false);
+        // the wait grows with the refusals of the request, not with its attempts
+        ScheduleRetry(request, reason, refusal.RetryAfter, request.RateLimitCount);
+    }
+
+    /// <summary>
+    /// Loads the request again after the retry delay of <paramref name="step"/> (its attempts, or its refusals for a service's limits),
+    /// or after the server's time when that is longer, up to <see cref="ScraperOptions.MaxRetryDelay"/>.
+    /// </summary>
+    private void ScheduleRetry(ScrapeRequest request, string reason, TimeSpan? retryAfter, int step)
     {
         Stats.AddRetry();
 
-        var delay = RetryDelay(request.Attempts);
+        var delay = RetryDelay(step);
         if (retryAfter is { } serverDelay)
         {
             // the server knows best, within MaxRetryDelay
             var capped = serverDelay < _options.MaxRetryDelay ? serverDelay : _options.MaxRetryDelay;
             if (capped > delay) delay = capped;
         }
-        Logger.LogDebug("Retry {Attempt} of {Url} in {DelayMs} ms: {Reason}", request.Attempts, request.Url, (int)delay.TotalMilliseconds, reason);
+        Logger.LogDebug("{Url} is loaded again in {DelayMs} ms, after {Attempts} attempts: {Reason}", request.Url, (int)delay.TotalMilliseconds,
+            request.Attempts, reason);
 
         if (delay <= TimeSpan.Zero)
         {
