@@ -19,8 +19,9 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 - **Proxies.** A proxy list from a text file (http, https, socks4, socks5, with logins), given out in turn; a proxy a site
   blocks rests for that site, a failing one rests for all.
 - **Politeness and limits.** A host that answers 429 / 503 or blocks is slowed down by itself while other hosts keep
-  full speed; robots.txt and its Crawl-delay on request; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
-  `MaxDepth`, `MaxRunDuration`.
+  full speed; robots.txt and its Crawl-delay on request; `MaxConcurrencyPerHost` and `HostDelay` for each host, and a
+  big site at its limit does not hold back the others; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
+  `MaxDepth`, `MaxRunDuration` for the run.
 - **Crawl scope.** `AllowedHosts` and `UrlFilter` keep the crawl on the sites and the parts of them you name; links that
   differ only by tracking parameters (`utm_*`, `gclid`...) or by the order of their parameters are one page.
 - **Sitemaps.** Sitemap indexes, gzipped and text sitemaps in one call: `ctx.EnqueueSitemap(PageType.Item)`.
@@ -377,6 +378,19 @@ takes the next one. A `User-Agent` in `DefaultHeaders` or in the request still w
 
 ## Throttling
 
+```csharp
+options.MaxConcurrencyPerHost = 2;                     // loads of one host at once
+options.HostDelay = TimeSpan.FromSeconds(1);           // between the starts of two loads of one host
+```
+
+`MaxConcurrency` and `MaxRequestsPerMinute` are for the whole run; `MaxConcurrencyPerHost` and `HostDelay` are for each
+host (with its port). A load holds its host's slot until the loader answers, not while the handler runs, and each
+`HostDelay` is a random 0–50 % longer, so the loads do not come like a clock. A request whose host may not load now waits
+in the host's line, not in a worker: the workers load other hosts meanwhile, so a big site at its limit does not hold
+back the rest of the queue. The line keeps the priorities of its requests, and a request whose turn comes goes first in
+the queue. Requests in the lines count in `Stats.Queued`. With a queue loader the limit is on the requests of a host in
+its queue at once.
+
 `AutoThrottle = true` turns on slowing a host down; it is off by default. It is for scraping from one address, where a 429,
 a 503 or a block means the site is loaded too hard. With rotating proxies a block is about the proxy (the proxy list rests
 it), and remote loaders set their own pace: there slowing the whole host only slows the scraping. Without it a 429 or 503
@@ -387,7 +401,8 @@ When it is on, a host that answers 429 or 503, or whose responses are blocked (a
 1 s apart at first, twice as long after each next such answer (up to `MaxThrottleDelay`, 1 min), and the delay shrinks
 again by 10 % with each good page. A `Retry-After` pauses the host as long as it asks. Requests to other hosts keep
 going at full speed meanwhile: the line holds requests, not workers. robots.txt `Crawl-delay` (with `RespectRobotsTxt`)
-spaces a host the same way whatever `AutoThrottle` is.
+spaces a host the same way whatever `AutoThrottle` is. When a host has several of `HostDelay`, `Crawl-delay` and the
+delay of `AutoThrottle`, the longest wins.
 
 ## Sitemaps and robots.txt
 
@@ -492,6 +507,8 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 |---|---|---|
 | `MaxConcurrency` | 8 | requests loaded and handled at once |
 | `MaxRequestsPerMinute` | none | loads spread evenly, retries included |
+| `MaxConcurrencyPerHost` | none | loads of one host at once; the others wait in its line, not in a worker |
+| `HostDelay` | none | least time between the starts of two loads of one host, each up to 50 % longer at random |
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
 | `RequestsNeededBelow` | 1000 | with `RequestsNeeded` handlers: ask for more requests when fewer are unfinished |
 | `MaxDepth` | none | deepest link to follow; start requests are depth 0, so 0 loads only them |

@@ -6,8 +6,8 @@ namespace z3l.Scraper;
 public sealed class ScraperOptions
 {
     /// <summary>
-    /// Requests loaded and handled at the same time. With an <see cref="Loading.IQueuePageLoader"/> every request goes to the queue
-    /// at once, and this limits only the handlers that run at once.
+    /// Requests loaded and handled at the same time, of all hosts (<see cref="MaxConcurrencyPerHost"/> limits each host). With an
+    /// <see cref="Loading.IQueuePageLoader"/> every request goes to the queue at once, and this limits only the handlers that run at once.
     /// </summary>
     public int MaxConcurrency { get; set; } = 8;
 
@@ -52,6 +52,21 @@ public sealed class ScraperOptions
     /// <see cref="MaxConcurrency"/> is. Null for no limit.
     /// </summary>
     public int? MaxRequestsPerMinute { get; set; }
+
+    /// <summary>
+    /// Loads of one host (with its port) going at the same time, under <see cref="MaxConcurrency"/>. A request of a host that has this
+    /// many waits in the host's line, not in a worker, so the workers load other hosts meanwhile and a big site at its limit does not
+    /// hold back the rest of the queue. A load holds its slot until the loader answers, not while the handler runs. With an
+    /// <see cref="Loading.IQueuePageLoader"/> it limits the requests of a host in the loader's queue at once. Null, the default, for no limit.
+    /// </summary>
+    public int? MaxConcurrencyPerHost { get; set; }
+
+    /// <summary>
+    /// Least time between the starts of two loads of one host (with its port), each a random 0–50 % longer so the loads do not come
+    /// like a clock; requests of the host wait in its line meanwhile, not in a worker. A robots.txt Crawl-delay or a delay of
+    /// <see cref="AutoThrottle"/>, when longer, wins. Up to a day; zero, the default, for none.
+    /// </summary>
+    public TimeSpan HostDelay { get; set; }
 
     /// <summary>
     /// With handlers of <see cref="Scraper.RequestsNeeded"/>: the event is raised when fewer requests than this are unfinished
@@ -127,7 +142,10 @@ public sealed class ScraperOptions
     /// </summary>
     public bool AutoThrottle { get; set; }
 
-    /// <summary>Longest delay between loads of a throttled host (and the longest robots.txt Crawl-delay honoured).</summary>
+    /// <summary>
+    /// Longest delay between loads of a throttled host (and the longest robots.txt Crawl-delay honoured). It does not cut
+    /// <see cref="HostDelay"/>.
+    /// </summary>
     public TimeSpan MaxThrottleDelay { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
@@ -215,6 +233,11 @@ public sealed class ScraperOptions
         }
         if (MaxRequests is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequests), MaxRequests, "Must be 1 or more");
         if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
+        if (MaxConcurrencyPerHost is < 1) throw new ArgumentOutOfRangeException(nameof(MaxConcurrencyPerHost), MaxConcurrencyPerHost, "Must be 1 or more");
+        if (HostDelay < TimeSpan.Zero || HostDelay > TimeSpan.FromDays(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(HostDelay), HostDelay, "Must be from zero to a day");
+        }
         if (RequestsNeededBelow < 0) throw new ArgumentOutOfRangeException(nameof(RequestsNeededBelow), RequestsNeededBelow, "Must be 0 or more");
         if (MaxDepth is < 0) throw new ArgumentOutOfRangeException(nameof(MaxDepth), MaxDepth, "Must be 0 or more");
         if (MaxConsecutiveHandlerErrors is < 1)

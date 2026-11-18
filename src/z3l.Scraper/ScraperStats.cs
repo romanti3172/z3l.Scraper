@@ -147,7 +147,10 @@ public sealed class ScraperStats
     public long Items => Interlocked.Read(ref _items);
     /// <summary>Requests being loaded or handled now.</summary>
     public long InProgress => Interlocked.Read(ref _inProgress);
-    /// <summary>Requests waiting in the queue (retries waiting for their delay are not counted).</summary>
+    /// <summary>
+    /// Requests waiting in the queue or in the line of their host (<see cref="ScraperOptions.MaxConcurrencyPerHost"/>,
+    /// <see cref="ScraperOptions.HostDelay"/>, throttling); retries waiting for their delay are not counted.
+    /// </summary>
     public long Queued => Interlocked.Read(ref _queued);
     /// <summary>Requests not finished: queued, in progress or waiting for a retry.</summary>
     public long Pending => Enqueued - Succeeded - Failed;

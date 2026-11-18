@@ -100,7 +100,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             _rateInterval = Stopwatch.Frequency * 60 / perMinute;
         }
         _scope = new CrawlScope(_options);
-        _throttle = new HostThrottle(_options.MaxThrottleDelay, Push, scraper.Logger, _stop.Token);
+        _throttle = new HostThrottle(_options, Stats, Push, scraper.Logger, _stop.Token);
         if (_options.RespectRobotsTxt)
         {
             _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
@@ -540,7 +540,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         }
         var fromCache = cached != null;
 
-        // a throttled host: the request waits in the host's line and comes back through the queue when its slot comes
+        // a host spaced or at its limit: the request waits in the host's line and comes back through the queue when its slot comes.
+        // A load let go here gives its slot back as soon as the loader answers (Exit)
         if (!fromCache && !_throttle.Enter(host, request)) return;
 
         if (!fromCache) await WaitForRateSlotAsync(token).ConfigureAwait(false);
@@ -577,8 +578,15 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 if (_options.RequestTimeout != Timeout.InfiniteTimeSpan && !queued) timeout.CancelAfter(_options.RequestTimeout);
                 try
                 {
-                    response = await loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
-                               ?? throw new InvalidOperationException($"{loader.GetType().Name}.LoadAsync returned null");
+                    try
+                    {
+                        response = await loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
+                                   ?? throw new InvalidOperationException($"{loader.GetType().Name}.LoadAsync returned null");
+                    }
+                    finally
+                    {
+                        _throttle.Exit(host);       // the host's slot: the handler does not hold it
+                    }
                     verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
                 }
                 catch (NonRetryableException ex) when (!token.IsCancellationRequested)
