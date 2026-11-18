@@ -57,15 +57,20 @@ var scraper = new Scraper(loader, new ScraperOptions { MaxConcurrency = 8 })    
   - a domain that cannot be reached (421), or that Zyte API does not load (451).
 
   These are retried at the same level:
-  - Zyte API's limits (429, 503);
+  - Zyte API's limits (429, 503), without spending an attempt (see the limits below);
   - its timeout or its own error (500), and its download error (521);
   - a call without an answer in `CallTimeout` (3 minutes); Zyte API may still finish it, and bill it.
 
   Zyte API bills none of its errors. A message tells its problem type and detail (`400 /request/invalid: ...`), never the key.
 - **Limits.** Zyte API limits calls per minute (3000 on standard plans), not calls at once. Its documentation reckons the
-  calls at once as the limit ÷ 60 × the seconds a call takes on average: 100 for 2 seconds. It asks to retry its limits
-  without end and with long waits, while the scraper counts them as attempts: near the limit, raise `MaxRetries` or
-  `RetryDelay`.
+  calls at once as the limit ÷ 60 × the seconds a call takes on average: 100 for 2 seconds. Above its limits it answers 429
+  (`/limits/over-user-limit`, `/limits/over-domain-limit`...), or 503 when the whole service is over its own
+  (`/limits/over-global-limit`), with a `Retry-After`. It bills none of them and asks to retry them without end, with long
+  waits. The page was not tried, so the scraper loads it again after Zyte API's `Retry-After` (up to `MaxRetryDelay`, 1
+  minute), and such a retry takes none of its attempts: `MaxRetries` stays for the site. A page takes `RateLimitRetries`
+  (20) of them, about a quarter of an hour of waits; past them a refusal counts as an attempt, so a run ends even when Zyte
+  API refuses every call. Raise `RateLimitRetries` to wait longer. `Stats.RateLimited` counts the refusals, and
+  `Stats.Reasons` names each limit (`rate limited: Zyte API limits the calls (429 /limits/over-user-limit): ...`).
 - **More fields.**
   - `Geolocation` is the country of the call, two letters; a country other than the 20 standard ones costs more.
   - `Configure` sets any other field of the call, for the request and the level, on the call's JSON:

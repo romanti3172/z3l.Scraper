@@ -42,7 +42,9 @@ public class ServicePageLoaderOptions
 /// </list>
 /// A derived class makes the call in <see cref="CallAsync"/>: it turns the request into the service's request and the service's answer
 /// into the page as the site gave it, or throws <see cref="RemoteLoadException"/> when the service had no page and
-/// <see cref="NonRetryableException"/> when another call cannot help (a wrong key, no credits left).
+/// <see cref="NonRetryableException"/> when another call cannot help (a wrong key, no credits left). When the service refused the call
+/// for its limits, the exception says so (<see cref="RemoteLoadException.RateLimited"/>, with the service's
+/// <see cref="RemoteLoadException.RetryAfter"/>: <see cref="RetryAfterOf"/>), and the scraper's retry takes no attempt.
 /// </summary>
 public abstract class ServicePageLoader : QueuePageLoader, IBlockAwarePageLoader
 {
@@ -78,7 +80,8 @@ public abstract class ServicePageLoader : QueuePageLoader, IBlockAwarePageLoader
     /// <summary>
     /// Loads a page through the service: one call at <paramref name="level"/>. Returns the page as the site gave it (its status,
     /// headers, final URL and body), not the service's own answer. Throws <see cref="RemoteLoadException"/> when the service had no page
-    /// (its error, its timeout, its 5xx, its limit of calls) and <see cref="NonRetryableException"/> when another call cannot help.
+    /// (its error, its timeout, its 5xx), with <see cref="RemoteLoadException.RateLimited"/> when it refused the call for its limits,
+    /// and <see cref="NonRetryableException"/> when another call cannot help.
     /// </summary>
     /// <param name="client">The client of the calls.</param>
     /// <param name="request">The request.</param>
@@ -88,6 +91,20 @@ public abstract class ServicePageLoader : QueuePageLoader, IBlockAwarePageLoader
 
     /// <summary>Counts what a call cost, as the service tells it.</summary>
     protected void AddCredits(double credits) => Interlocked.Add(ref _creditsThousandths, (long)Math.Round(credits * 1000));
+
+    /// <summary>
+    /// The <c>Retry-After</c> of the service's answer, seconds or a date, as <see cref="RemoteLoadException.RetryAfter"/> takes it; null
+    /// when it has none or none that reads.
+    /// </summary>
+    protected static TimeSpan? RetryAfterOf(HttpResponseMessage answer)
+    {
+        ArgumentNullException.ThrowIfNull(answer);
+        if (answer.Headers.RetryAfter is not { } retryAfter) return null;
+        if (retryAfter.Delta is { } delta) return delta;
+        if (retryAfter.Date is not { } date) return null;
+        var wait = date - DateTimeOffset.UtcNow;
+        return wait > TimeSpan.Zero ? wait : TimeSpan.Zero;
+    }
 
     /// <inheritdoc />
     protected sealed override Task SendAsync(RemoteLoad load, CancellationToken cancellationToken)

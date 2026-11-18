@@ -17,11 +17,23 @@ public sealed class ScraperOptions
     /// </summary>
     public int MaxLoadedNotHandled { get; set; } = 100;
 
-    /// <summary>Retries after a failed load, a broken page or a blocked response (the first attempt is not counted).</summary>
+    /// <summary>
+    /// Retries after a failed load, a broken page or a blocked response (the first attempt is not counted). A load a scraping service
+    /// refused for its limits takes none of them (<see cref="RateLimitRetries"/>).
+    /// </summary>
     public int MaxRetries { get; set; } = 5;
 
     /// <summary>Retries of a page that looks missing (404, not found marker): sites sometimes answer 404 by mistake.</summary>
     public int NotFoundRetries { get; set; } = 1;
+
+    /// <summary>
+    /// Retries of a page a scraping service refused for its limits (<see cref="Loading.RemoteLoadException.RateLimited"/>: too many
+    /// calls at once or per minute), not counted in <see cref="MaxRetries"/>: the page was not tried. Each waits as long as the
+    /// service asks (<see cref="Loading.RemoteLoadException.RetryAfter"/>, up to <see cref="MaxRetryDelay"/>), and at least the retry
+    /// delay, which grows with the refusals. Past them a refusal is an attempt like a load error, so a run ends even when the service
+    /// refuses every call.
+    /// </summary>
+    public int RateLimitRetries { get; set; } = 20;
 
     /// <summary>Delay before the first retry; each next retry waits <see cref="RetryBackoffFactor"/> times longer.</summary>
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(1);
@@ -154,6 +166,7 @@ public sealed class ScraperOptions
         if (MaxLoadedNotHandled < 1) throw new ArgumentOutOfRangeException(nameof(MaxLoadedNotHandled), MaxLoadedNotHandled, "Must be 1 or more");
         if (MaxRetries < 0) throw new ArgumentOutOfRangeException(nameof(MaxRetries), MaxRetries, "Must be 0 or more");
         if (NotFoundRetries < 0) throw new ArgumentOutOfRangeException(nameof(NotFoundRetries), NotFoundRetries, "Must be 0 or more");
+        if (RateLimitRetries < 0) throw new ArgumentOutOfRangeException(nameof(RateLimitRetries), RateLimitRetries, "Must be 0 or more");
         if (ItemBufferSize < 1) throw new ArgumentOutOfRangeException(nameof(ItemBufferSize), ItemBufferSize, "Must be 1 or more");
         if (RetryBackoffFactor < 1) throw new ArgumentOutOfRangeException(nameof(RetryBackoffFactor), RetryBackoffFactor, "Must be 1 or more");
         if (RetryDelay < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(RetryDelay), RetryDelay, "Must not be negative");

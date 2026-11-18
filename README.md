@@ -288,10 +288,11 @@ Checks run in this order; the first that matches decides:
 | any other non-2xx status | Retry | retried up to `MaxRetries` (5), then failed |
 | empty body (except 204), wrong format, `MustContain`, `MustNotContain`, `Custom` | Retry | as above |
 | load error or timeout | Retry | as above |
+| a scraping service refused the load for its limits ([remote loaders](#remote-loaders)) | Retry | no attempt spent, `RateLimitRetries` times (20); then as above |
 
 String checks ignore case. A blocked response or a 429 with `Retry-After` waits as long as the server asks
-(up to `MaxRetryDelay`). Keep the reason of a custom check short and the same for alike pages (`"page too short"`, not
-the length): `Stats.Reasons` groups the attempts by it.
+(up to `MaxRetryDelay`), and so does a scraping service that sends one. Keep the reason of a custom check short and the
+same for alike pages (`"page too short"`, not the length): `Stats.Reasons` groups the attempts by it.
 
 ## Proxies
 
@@ -455,6 +456,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `MaxDepth` | none | deepest link to follow; start requests are depth 0, so 0 loads only them |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
+| `RateLimitRetries` | 20 | retries of a page a scraping service refused for its limits, not counted in `MaxRetries` |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
 | `RequestTimeout` | 2 min | a slower load is cancelled and retried |
 | `MaxRunDuration` | none | stop and return what was scraped |
@@ -484,7 +486,7 @@ scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.
 ```
 
 `scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, from cache, retries, blocked,
-items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
+rate limited, items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
 
 `Stats.Reasons` tells why attempts gave no page, so a site that blocks or a selector that broke shows at once. Every retry
 and every failure is counted once, in a group of its kind, reason, label and host, most frequent first. The reason is the
@@ -492,7 +494,8 @@ same for alike attempts:
 - the check that failed: `status 403`, `marker "captcha"`, `no "price"`;
 - the timeout;
 - the kind of a load error (`ConnectionError`, `ProxyTunnelError`), not its message, which names the proxy and the IP;
-- the type of what a handler threw, or the message of its `RetryRequestException` or `NonRetryableException`.
+- the type of what a handler threw, or the message of its `RetryRequestException` or `NonRetryableException`;
+- the message of a scraping service's refusal for its limits (`rate limited`).
 
 `Count` is how many times, `Failed` how many of them ended their request, and `Example` and `ExampleUrl` keep the message
 and the URL of the last one. The last log line of a run names the first five:
@@ -628,6 +631,8 @@ public sealed class MyServiceLoader(string apiKey) : ServicePageLoader(new Servi
         using var answer = await client.GetAsync($"https://api.service.example/?key={apiKey}&url={Uri.EscapeDataString(request.Url)}&premium={level > 0}",
             cancellationToken);
         if (answer.StatusCode == HttpStatusCode.Unauthorized) throw new NonRetryableException("wrong API key");
+        if (answer.StatusCode == HttpStatusCode.TooManyRequests)
+            throw new RemoteLoadException("over the plan's limit") { RateLimited = true, RetryAfter = RetryAfterOf(answer) };
         if ((int)answer.StatusCode >= 500) throw new RemoteLoadException($"the service failed: {answer.StatusCode}");
         AddCredits(level > 0 ? 10 : 1);
         return PageResponse.FromText(200, request.Url, await answer.Content.ReadAsStringAsync(cancellationToken));
@@ -641,6 +646,13 @@ public sealed class MyServiceLoader(string apiKey) : ServicePageLoader(new Servi
 - `CallAsync` returns the page as the site gave it, throws `RemoteLoadException` when the service had no page and
   `NonRetryableException` when another call cannot help. Any other exception of a call, such as a network error to the
   service, is a `RemoteLoadException`.
+- When the service refused the call for its limits (too many calls at once or per minute), the `RemoteLoadException` says
+  so: `RateLimited`, and the service's `Retry-After` as `RetryAfterOf(answer)` reads it. The page was not tried, so the
+  scraper loads it again without spending an attempt, after the service's time (up to `MaxRetryDelay`) or the retry delay,
+  whichever is longer; that delay grows with the page's refusals. A page takes `RateLimitRetries` (20) such retries; past
+  them a refusal counts against `MaxRetries` like any load error, so a run ends even when the service refuses every call.
+  `Stats.RateLimited` counts the refusals, and `Stats.Reasons` groups them by their message as `rate limited`. A
+  `RetryAfter` without `RateLimited` is waited as well, and that retry is an attempt.
 - A page that comes back blocked is loaded again one level up, to `MaxLevel`, and the host goes on from the level that got
   through. `CallAsync` calls `LevelUp` itself when the service says the site resisted. `Credits` sums what `AddCredits`
   counted, and `ToString()` shows it with the counters.

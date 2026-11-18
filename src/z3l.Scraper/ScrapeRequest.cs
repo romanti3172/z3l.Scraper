@@ -94,7 +94,10 @@ public sealed record ScrapeRequest
     /// </summary>
     public bool SkipDuplicateCheck { get; init; }
 
-    /// <summary>Number of load attempts made so far (1 in the first handler call).</summary>
+    /// <summary>
+    /// Number of load attempts made so far (1 in the first handler call). A load a scraping service refused for its limits is no
+    /// attempt (<see cref="ScraperOptions.RateLimitRetries"/>).
+    /// </summary>
     public int Attempts { get; internal set; }
 
     /// <summary>Link depth: 0 for start requests, one more than the page whose handler queued it.</summary>
@@ -108,6 +111,9 @@ public sealed record ScrapeRequest
     public string? ParentUrl { get; internal set; }
 
     internal int NotFoundCount { get; set; }
+
+    /// <summary>Loads a scraping service refused for its limits that took no attempt (<see cref="ScraperOptions.RateLimitRetries"/>).</summary>
+    internal int RateLimitCount { get; set; }
 
     /// <summary>The request already holds a load slot of its throttled host (it waited in the host's line).</summary>
     internal bool HasThrottleSlot { get; set; }

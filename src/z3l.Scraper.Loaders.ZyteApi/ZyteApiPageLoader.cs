@@ -67,8 +67,9 @@ public sealed class ZyteApiPageLoaderOptions : ServicePageLoaderOptions
 /// site's headers, and the body as the site sent it (<c>httpResponseBody</c>) or the HTML a browser made of it (<c>browserHtml</c>).
 /// <list type="bullet">
 /// <item>At most <see cref="ServicePageLoaderOptions.MaxConcurrency"/> calls go at once. Zyte API limits calls per minute (3000 on
-/// standard plans), not calls at once: set it to about the limit ÷ 60 × the seconds a call takes. Above the limit the API answers 429,
-/// and the page is retried.</item>
+/// standard plans), not calls at once: set it to about the limit ÷ 60 × the seconds a call takes. Above its limits the API answers 429
+/// (503 when the whole service is), and the page is loaded again after its Retry-After without spending an attempt, up to
+/// <see cref="ScraperOptions.RateLimitRetries"/> times.</item>
 /// <item>A page that comes back blocked, or that Zyte API could not get past a ban in time (520, not billed), goes one level up, through
 /// <see cref="ZyteApiPageLoaderOptions.Levels"/>: an HTTP request, then a browser. A request a browser cannot send (a method other
 /// than GET, a body) or that <see cref="ZyteApiPageLoaderOptions.NoBrowser"/> names goes as an HTTP request at every level. Zyte API's
@@ -160,7 +161,8 @@ public sealed class ZyteApiPageLoader : ServicePageLoader
             case 451:
                 throw new NonRetryableException($"Zyte API does not load the site's domain ({code}): {said}");
             case 429 or 503:
-                throw new RemoteLoadException($"Zyte API limits the calls ({code}): {said}");
+                // not billed, and the page was not tried: Zyte API asks to retry its limits without end, after its Retry-After
+                throw new RemoteLoadException($"Zyte API limits the calls ({code}): {said}") { RateLimited = true, RetryAfter = RetryAfterOf(answer) };
             case 520:
             {
                 // not billed: a ban Zyte API could not avoid in time, and a browser may get through. Its other failures go again as they are
