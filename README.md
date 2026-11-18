@@ -167,9 +167,10 @@ A page lives only while its handler runs: then the parser is disposed and the pa
 slow to take the items. Items and request data carry values taken from the page (`Text()`, `AttributeHref()`,
 `XPathValue()`...); `Emit` and `Enqueue` refuse tags, the parser and the context, a tag kept anyway throws
 `ObjectDisposedException`, and a kept context no longer holds the page. So the scraper holds at most `MaxConcurrency`
-pages and `ItemBufferSize` items; what grows with a run is the set of seen URLs (for duplicates) and the list of
-failed requests. The text of a page is decoded into a pooled buffer that the response checks, `ctx.Html` and `ctx.Json`
-read in place: a string of it is made only when a handler reads `ctx.Response.Text`.
+pages and `ItemBufferSize` items; what grows with a run is the set of pages seen, for duplicates (a 16-byte hash of
+each key, about 40 bytes a page), and the list of failed requests. The text of a page is decoded into a pooled buffer
+that the response checks, `ctx.Html` and `ctx.Json` read in place: a string of it is made only when a handler reads
+`ctx.Response.Text`.
 
 ## Response checks
 
@@ -329,10 +330,12 @@ await foreach (var item in scraper.RunAsync(startRequests))
 }
 ```
 
-The state file holds the requests not finished and the keys of the pages seen. It is written every
-`StateSaveInterval` (30 s) and when the run stops (time limit, cancellation, `break`, an exception in your loop), and
-deleted when the run has finished everything and you have taken every item. Start the program again with the same
-`StatePath` and the run continues where it stopped; the start requests are skipped as already seen.
+The state file holds the requests not finished; `state/shop.json.seen` next to it holds the pages seen, a 16-byte hash
+of each key, and every save only appends the new ones, so a run of millions of pages is not written out whole each time.
+Both are written every `StateSaveInterval` (30 s) and when the run stops (time limit, cancellation, `break`, an
+exception in your loop), and deleted when the run has finished everything and you have taken every item. Start the
+program again with the same `StatePath` and the run continues where it stopped; the start requests are skipped as
+already seen.
 
 Pages being loaded when the process died, and pages whose items you had not taken yet, are done again: you get every
 item at least once, so make saving idempotent (an upsert by URL). `RunToListAsync` keeps items in memory, so a crash

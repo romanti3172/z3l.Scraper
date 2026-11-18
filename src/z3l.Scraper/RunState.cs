@@ -6,22 +6,37 @@ using System.Text.Json.Serialization.Metadata;
 namespace z3l.Scraper;
 
 /// <summary>
-/// The state file of a run (<see cref="ScraperOptions.StatePath"/>): the keys of the pages seen and the requests not finished.
+/// The state of a run (<see cref="ScraperOptions.StatePath"/>), in two files. The state file holds the requests not finished and how
+/// many hashes of the pages seen are saved; the journal next to it (<see cref="SeenPath"/>) holds those hashes (<see cref="KeyHash"/>),
+/// 16 bytes each, and a save appends only the new ones, so a long run is not written whole every time.
 /// Written with Utf8JsonWriter and read with JsonDocument, no reflection: trimming and AOT safe.
 /// </summary>
 internal static class RunState
 {
     private const string Format = "z3l.Scraper state";
-    private const int Version = 1;
+    private const int Version = 2;      // version 1 kept the keys of the pages seen in the state file itself
 
-    internal sealed record Snapshot(IReadOnlyCollection<string> Seen, IReadOnlyCollection<ScrapeRequest> Pending);
+    /// <summary>A run read back.</summary>
+    /// <param name="Stored">Hashes of the pages seen that the journal holds: all of them, or none when the file is of version 1.</param>
+    /// <param name="Pending">The requests not finished.</param>
+    internal sealed record Saved(long Stored, IReadOnlyCollection<ScrapeRequest> Pending);
 
-    /// <summary>Writes the file atomically: a temporary file first, then a rename over the old one.</summary>
-    public static void Save(string path, Snapshot snapshot, StateDataCodec codec)
+    /// <summary>The journal of the hashes of the pages seen, next to the state file.</summary>
+    public static string SeenPath(string path) => path + ".seen";
+
+    /// <summary>
+    /// Saves the run: appends the hashes seen since the last save to the journal, after the <paramref name="stored"/> ones it holds,
+    /// then writes the state file that counts them. The state file is written atomically (a temporary file first, then a rename over
+    /// the old one) and only once the journal is on the disk, so hashes appended by a save that failed or by a process that died count
+    /// for nothing: the next save writes over them.
+    /// </summary>
+    public static void Save(string path, long stored, KeyHash[] seen, IReadOnlyCollection<ScrapeRequest> pending, StateDataCodec codec)
     {
         var full = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(full);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
+        AppendSeen(SeenPath(full), stored, seen);
 
         var temp = full + ".tmp";
         using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
@@ -32,13 +47,10 @@ internal static class RunState
                 writer.WriteString("format", Format);
                 writer.WriteNumber("version", Version);
                 writer.WriteString("savedAt", DateTimeOffset.UtcNow);
-
-                writer.WriteStartArray("seen");
-                foreach (var key in snapshot.Seen) writer.WriteStringValue(key);
-                writer.WriteEndArray();
+                writer.WriteNumber("seenCount", stored + seen.Length);     // the first hashes of the journal; any after them are not saved
 
                 writer.WriteStartArray("pending");
-                foreach (var request in snapshot.Pending) WriteRequest(writer, request, codec);
+                foreach (var request in pending) WriteRequest(writer, request, codec);
                 writer.WriteEndArray();
 
                 writer.WriteEndObject();
@@ -48,8 +60,40 @@ internal static class RunState
         File.Move(temp, full, overwrite: true);
     }
 
-    /// <exception cref="InvalidDataException">The file is not a state file of this version.</exception>
-    public static Snapshot Load(string path, StateDataCodec codec)
+    private static void AppendSeen(string path, long stored, KeyHash[] seen)
+    {
+        // a journal that has hashes to keep must be there: an empty one in its place would lose them
+        using var journal = new FileStream(path, stored == 0 ? FileMode.OpenOrCreate : FileMode.Open, FileAccess.Write, FileShare.Read, 65536);
+        if (journal.Length < stored * KeyHash.Size)
+        {
+            throw new InvalidDataException($"{path} lost hashes of the pages seen: it holds {journal.Length / KeyHash.Size} of {stored}");
+        }
+
+        journal.Position = stored * KeyHash.Size;
+        const int Batch = 4096;
+        var buffer = new byte[Math.Min(seen.Length, Batch) * KeyHash.Size];
+        for (var done = 0; done < seen.Length;)
+        {
+            var count = Math.Min(seen.Length - done, Batch);
+            for (var i = 0; i < count; i++) seen[done + i].Write(buffer.AsSpan(i * KeyHash.Size));
+            journal.Write(buffer, 0, count * KeyHash.Size);
+            done += count;
+        }
+        journal.Flush();
+        journal.SetLength(journal.Position);        // cuts what a save that failed left after them
+        journal.Flush(flushToDisk: true);
+    }
+
+    /// <summary>Deletes the state file and then its journal: a journal left without its state file is written over by the next run.</summary>
+    public static void Delete(string path)
+    {
+        File.Delete(path);
+        File.Delete(SeenPath(path));
+    }
+
+    /// <summary>Reads a saved run and adds the hashes of the pages seen to <paramref name="seen"/>.</summary>
+    /// <exception cref="InvalidDataException">The file is not a state file of a version this library reads, or its journal is short.</exception>
+    public static Saved Load(string path, StateDataCodec codec, HashSet<KeyHash> seen)
     {
         using var stream = File.OpenRead(path);
         JsonDocument document;
@@ -70,18 +114,30 @@ internal static class RunState
                 throw new InvalidDataException($"{path} is not a z3l.Scraper state file");
             }
             var version = root.TryGetProperty("version", out var v) && v.TryGetInt32(out var number) ? number : 0;
-            if (version != Version)
+            if (version is not (1 or Version))
             {
-                throw new InvalidDataException($"{path} is a state file of version {version}; this z3l.Scraper reads version {Version}");
+                throw new InvalidDataException($"{path} is a state file of version {version}; this z3l.Scraper reads versions 1 and {Version}");
             }
 
-            var seen = new List<string>();
-            if (root.TryGetProperty("seen", out var seenArray))
+            long stored = 0;
+            if (version == 1)
             {
-                foreach (var key in seenArray.EnumerateArray())
+                // the keys themselves: hashed here, and the first save puts the hashes into the journal
+                if (root.TryGetProperty("seen", out var keys))
                 {
-                    if (key.GetString() is { } value) seen.Add(value);
+                    foreach (var key in keys.EnumerateArray())
+                    {
+                        if (key.GetString() is { } value) seen.Add(KeyHash.Of(value));
+                    }
                 }
+            }
+            else
+            {
+                if (!root.TryGetProperty("seenCount", out var count) || !count.TryGetInt64(out stored) || stored < 0)
+                {
+                    throw new InvalidDataException($"{path} is not a z3l.Scraper state file: no seenCount");
+                }
+                ReadSeen(path, stored, seen);
             }
 
             var pending = new List<ScrapeRequest>();
@@ -89,8 +145,43 @@ internal static class RunState
             {
                 foreach (var item in pendingArray.EnumerateArray()) pending.Add(ReadRequest(item, codec));
             }
-            return new Snapshot(seen, pending);
+            return new Saved(stored, pending);
         }
+    }
+
+    /// <summary>Reads the first <paramref name="count"/> hashes of the journal: those the state file counts.</summary>
+    private static void ReadSeen(string path, long count, HashSet<KeyHash> seen)
+    {
+        if (count == 0) return;
+
+        var journalPath = SeenPath(Path.GetFullPath(path));
+        FileStream journal;
+        try
+        {
+            journal = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+        }
+        catch (FileNotFoundException)
+        {
+            throw Short(0);
+        }
+
+        using (journal)
+        {
+            if (journal.Length < count * KeyHash.Size) throw Short(journal.Length / KeyHash.Size);
+
+            seen.EnsureCapacity((int)Math.Min(count, Array.MaxLength));
+            var buffer = new byte[64 * 1024];       // a multiple of KeyHash.Size
+            for (var left = count * KeyHash.Size; left > 0;)
+            {
+                var length = (int)Math.Min(buffer.Length, left);
+                journal.ReadExactly(buffer, 0, length);
+                for (var i = 0; i < length; i += KeyHash.Size) seen.Add(KeyHash.Read(buffer.AsSpan(i)));
+                left -= length;
+            }
+        }
+
+        InvalidDataException Short(long holds) => new(
+            $"{journalPath} holds {holds} hashes of the pages seen, and {path} counts {count}: bring that file back, or delete {path} to start the run over");
     }
 
     private static void WriteRequest(Utf8JsonWriter writer, ScrapeRequest request, StateDataCodec codec)
