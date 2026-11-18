@@ -27,6 +27,8 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 - **Streaming with backpressure.** `await foreach` over items; a slow consumer slows the scraper down instead of
   filling the memory.
 - **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser or anything else.
+- **Cache and snapshots.** Pages the handlers took are kept and given back, so you work on handlers without loading the
+  site each time; pages that were blocked, missing or broken are saved, so you see what the site answered.
 - **Trimming and AOT compatible.**
 
 ## Install
@@ -161,7 +163,18 @@ scraper.Route(PageType.Item, ctx =>
 ```
 
 Any other exception fails the request with `FailureReason.HandlerError` (set `Options.RetryOnHandlerError` to retry it).
-Items emitted by a handler that throws are dropped.
+Items emitted by a handler that throws are dropped; the requests it queued before it threw stay queued.
+
+When the site changes its pages, a handler breaks: every page of its label fails, and loading the rest only wastes
+traffic. `MaxConsecutiveHandlerErrors` stops the run after that many handler errors in a row of one label on one host;
+a page the handler takes starts the count again, so odd pages here and there do not stop it. `RetryRequestException` and
+`NonRetryableException` are not handler errors. The run ends as after `MaxRunDuration`, with
+`Stats.StoppedByHandlerErrors`; with `StatePath` the pages the handler failed in a row stay with the unfinished ones, so
+the run continued after the fix does them again.
+
+```csharp
+options.MaxConsecutiveHandlerErrors = 20;
+```
 
 A page lives only while its handler runs: then the parser is disposed and the page is let go, even if the consumer is
 slow to take the items. Items and request data carry values taken from the page (`Text()`, `AttributeHref()`,
@@ -357,6 +370,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
 | `StatePath`, `StateSaveInterval`, `StateJson` | none, 30 s, none | save the run and continue it after a crash |
 | `RetryOnHandlerError` | false | retry when a handler throws |
+| `MaxConsecutiveHandlerErrors` | none | stop the run when the handler of a label fails this many times in a row on a host |
 | `ItemBufferSize` | 1000 | items waiting for the consumer before workers wait |
 | `ProgressInterval` | 30 s | progress line in the log |
 
@@ -376,7 +390,7 @@ result.Stats;                 // counters
 scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.Request.Url, failed.Message);
 ```
 
-`scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, retries, blocked,
+`scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, from cache, retries, blocked,
 items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
 
 ## Loaders
@@ -447,6 +461,48 @@ is such a loader on RabbitMQ, with the workers for it.
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,
 and `iso-8859-1` is read as windows-1252, so `0x80` is `€`.
+
+## Cache and snapshots
+
+Two helpers for the pages of every loader and label, set on the scraper:
+
+```csharp
+var scraper = new Scraper(loader, options)
+{
+    CachingPageLoader = new CachingPageLoader { Path = "cache" },          // the pages the handlers took, given back next time
+    SnapshotPageLoader = new SnapshotPageLoader { Path = "snapshots" },    // the pages that were not taken, to look at
+};
+```
+
+**The cache** keeps the pages that passed the checks and that their handler took, and gives them back instead of loading
+them again: run the scraper over and over while you work on the handlers, without loading the site each time. Block
+pages and cut-off pages never get in. A page from the cache skips the host throttle, the rate limit and the loader, is
+checked with the rules of its label like any page, and the loader hears nothing about it. A kept page that fails the
+checks later (the rules changed) or whose handler throws `RetryRequestException` is forgotten and loaded, without taking
+an attempt. `Stats.FromCache` counts the pages the cache gave.
+
+```csharp
+new CachingPageLoader
+{
+    Path = "cache",                    // a folder per host; per page the body (.html, .json...) and its description (.meta.json)
+    Labels = { PageType.Item },        // only these labels; empty, the default, for every label
+    Filter = (request, response) => response.Url.Contains("/p/"),     // which of them to keep; all by default
+    MaxAge = TimeSpan.FromDays(1),     // older pages are loaded again; zero, the default, keeps them for ever
+    MaxPages = 1000,                   // pages to keep at most, earlier runs included; 0, the default, for no limit
+};
+```
+
+**Snapshots** are the loaded pages that were not taken: blocked, missing, failing the checks, or those whose handler threw,
+one for every such attempt. They go to `{Path}/{label}/{kind}`, the kind being `blocked`, `retry`, `not-found` or
+`handler-error`, two files each: the body and its description (the request, the reason, the status, the headers, what the
+handler threw). A load that brought no page (a network error, a timeout) has no snapshot. `SnapshotPageLoader` takes
+`Labels` and a `Filter` too (`snapshot => snapshot.Kind == SnapshotKind.Blocked`), and `MaxPerKind` (for each label and
+kind) and `MaxSnapshots` limit how many it saves; 0, the default, for no limit. Files of earlier runs stay.
+
+To keep the pages elsewhere, in a database for example, override the storage and keep the labels, the filter and the
+limits of the classes (`ReadAsync`, `WriteAsync`, `DeleteAsync` and `CountStored` of `CachingPageLoader`, `WriteAsync` of
+`SnapshotPageLoader`), or implement `ICachingPageLoader` or `ISnapshotPageLoader` yourself; `CachedPage.From` and
+`ToResponse` turn a response into what to keep and back.
 
 ## Logging
 
