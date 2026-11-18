@@ -712,7 +712,9 @@ Such loaders come one package per service:
 - [z3l.Scraper.Loaders.ScrapingBee](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ScrapingBee/README.md),
   `new ScrapingBeePageLoader(new() { ApiKey = ..., MaxConcurrency = 10 })`;
 - [z3l.Scraper.Loaders.ScraperApi](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ScraperApi/README.md),
-  `new ScraperApiPageLoader(new() { ApiKey = ..., MaxConcurrency = 5 })`: written from ScraperAPI's documentation, not yet run against the real API.
+  `new ScraperApiPageLoader(new() { ApiKey = ..., MaxConcurrency = 5 })`: written from ScraperAPI's documentation, not yet run against the real API;
+- [z3l.Scraper.Loaders.ZenRows](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ZenRows/README.md),
+  `new ZenRowsPageLoader(new() { ApiKey = ..., MaxConcurrency = 20 })`: written from ZenRows' documentation, not yet checked against the real API (that needs a key).
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,

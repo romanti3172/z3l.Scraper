@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- shared settings and the version: ..\Directory.Build.props -->
+
+  <PropertyGroup>
+    <RootNamespace>z3l.Scraper.Loaders.ZenRows</RootNamespace>
+    <AssemblyName>z3l.Scraper.Loaders.ZenRows</AssemblyName>
+    <!-- not published yet: written from ZenRows' documentation, not checked against the real API; that needs a key (TODO.md) -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>z3l.Scraper.Loaders.ZenRows</PackageId>
+    <Description>A page loader for z3l.Scraper through the ZenRows Fetch API (formerly the Universal Scraper API): its proxies, browsers and anti-bot handling, called a page at a time within the plan's limit; a page that comes back blocked is loaded again with premium proxies or a browser.</Description>
+    <PackageTags>scraper;web-scraping;crawler;zenrows;scraping-api;proxy;dotnet;net9;net10</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\z3l.Scraper\z3l.Scraper.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="z3l.Scraper.Loaders.ZenRows.Tests" />
+  </ItemGroup>
+
+</Project>
