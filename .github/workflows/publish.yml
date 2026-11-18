@@ -1,6 +1,6 @@
 name: Publish
 
-# Publishes both packages to nuget.org on a version tag (v0.1.0-preview.6) or by hand.
+# Publishes the packages to nuget.org on a version tag (v0.1.0-preview.8) or by hand.
 # No API key is stored: nuget.org trusted publishing (policy "z3l.Scraper", workflow publish.yml)
 # gives this workflow a short-lived key through GitHub's OIDC token.
 
@@ -53,13 +53,13 @@ jobs:
         with:
           user: romanti3172
 
-      # z3l.Scraper first: z3l.Scraper.Playwright depends on it; the .snupkg files go along
+      # z3l.Scraper first: the others depend on it; the .snupkg files go along
       - name: Push
         shell: bash
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
-          for id in z3l.Scraper z3l.Scraper.Playwright; do
+          for id in z3l.Scraper z3l.Scraper.Playwright z3l.Scraper.Loaders.ScrapingBee; do
             dotnet nuget push "artifacts/$id.$VERSION.nupkg" --api-key "$NUGET_API_KEY" \
               --source https://api.nuget.org/v3/index.json --skip-duplicate
           done

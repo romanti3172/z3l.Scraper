@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>z3l.Scraper: web scraping engine for .NET</title>
-  <meta name="description" content="Block-aware web scraping engine for .NET 9 and 10: retries, block detection, per-host throttling, robots.txt, sitemaps and runs that survive a crash. HTML parsed with z3l.FastHtmlParser.">
+  <meta name="description" content="Block-aware web scraping engine for .NET 9 and 10: retries, block detection, per-host throttling and limits, crawl scope, robots.txt, sitemaps and runs that survive a crash; loaders for a headless browser and scraping APIs. HTML parsed with z3l.FastHtmlParser.">
   <meta property="og:title" content="z3l.Scraper: web scraping engine for .NET">
   <meta property="og:description" content="Scrape sites that fight back: blocks, 429s, cut-off pages and crashes are handled for you. You write what to take from a page.">
   <meta property="og:image" content="icon.svg">
@@ -43,7 +43,7 @@
 
     <div class="stats">
       <div class="stat"><b>27k</b><span>pages/s engine speed, in-memory loader</span></div>
-      <div class="stat"><b>9</b><span>kinds of site trouble handled</span></div>
+      <div class="stat"><b>10</b><span>kinds of site trouble handled</span></div>
       <div class="stat"><b>0</b><span>pages lost when a run resumes</span></div>
       <div class="stat"><b>2</b><span>dependencies</span></div>
     </div>
@@ -104,6 +104,7 @@
             <tr><td>A page cut off half-way, an empty body, broken JSON</td><td>Retried: <code>ExpectedContent.Html</code>, <code>Json</code>, <code>MustContain</code> per kind of page.</td></tr>
             <tr><td>404 or "Product not found"</td><td>Reported as not found after one more try, not retried forever.</td></tr>
             <tr><td>Prices hidden for bots: looks fine, isn't</td><td>Your handler throws <code>RetryRequestException</code>: retried and counted as a block.</td></tr>
+            <tr><td>Pages built by scripts, or no pages for datacenter proxies</td><td>Load them in a browser with <code>z3l.Scraper.<wbr>Playwright</code>, or through ScrapingBee with <code>z3l.Scraper.<wbr>Loaders.<wbr>ScrapingBee</code>: a page that comes back blocked goes again with premium proxies, and the stealth pool if you allow it.</td></tr>
             <tr><td>robots.txt rules and Crawl-delay</td><td>Disallowed pages are skipped and loads are spaced, with <code>RespectRobotsTxt</code>.</td></tr>
             <tr><td>Your process dies at page 40,000</td><td>The next run continues from the state file. Pages whose items you had not taken are done again: nothing is lost.</td></tr>
           </tbody>
@@ -116,13 +117,18 @@
     <div class="wrap">
       <div class="section-head">
         <h2>Everything a crawl needs</h2>
-        <p>In one package of about 3,300 lines, with tests for every case.</p>
+        <p>The engine is one package of about 5,000 lines of code, with tests for every case.</p>
       </div>
       <div class="features">
         <div class="feature">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h7"/><path d="m17 15 3 3-3 3"/></svg></div>
           <h3>Queue with priorities</h3>
-          <p>De-duplicated by method, URL and body. Link depth, <code>MaxDepth</code>, <code>MaxRequests</code>, <code>MaxRequestsPerMinute</code>, time limits.</p>
+          <p>De-duplicated by method, URL and body. Link depth, <code>MaxDepth</code>, <code>MaxRequests</code>, <code>MaxRequestsPerMinute</code>, time limits; a big source of URLs is read as the run needs it.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></div>
+          <h3>Crawl scope and host limits</h3>
+          <p><code>AllowedHosts</code> and <code>UrlFilter</code> keep the crawl where you want it; <code>utm_*</code>, <code>gclid</code> and other tracking parameters are dropped. <code>MaxConcurrencyPerHost</code> and <code>HostDelay</code> with jitter go easy on each site.</p>
         </div>
         <div class="feature">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
@@ -146,13 +152,23 @@
         </div>
         <div class="feature">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/></svg></div>
-          <h3>Proxies, or any loader</h3>
-          <p>HttpClient with rotating http and socks proxies from a text file built in; plug a browser or anything else with <code>IPageLoader</code>. Trimming and AOT compatible.</p>
+          <h3>Proxies, browsers, scraping APIs</h3>
+          <p>HttpClient with rotating http and socks proxies, and a stealth loader with HTTP/2 and browser headers. A headless browser in <code>z3l.Scraper.<wbr>Playwright</code>, ScrapingBee in <code>z3l.Scraper.<wbr>Loaders.<wbr>ScrapingBee</code>, or your own <code>IPageLoader</code>. The engine is trimming and AOT compatible.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h4l2-3h6l2 3h4v12H3z"/><circle cx="12" cy="13" r="4"/></svg></div>
+          <h3>Cache and snapshots</h3>
+          <p>Work on a handler without loading the site again: <code>CachingPageLoader</code> keeps the pages your handlers took, <code>SnapshotPageLoader</code> saves what a block looked like, <code>ParseAsync</code> runs one page through its handler.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V5M16 20v-7M2 20h20"/></svg></div>
+          <h3>Why pages failed</h3>
+          <p><code>Stats.Reasons</code> groups every retry and failure by kind, reason, label and host, most frequent first: <code>8711x blocked: marker "captcha" (Item, shop.com)</code>.</p>
         </div>
       </div>
-      <p class="honest"><b>What it is not.</b> It does not run JavaScript: for pages built in the browser, plug a browser loader
-        (Playwright, Selenium, a remote farm) into <code>IPageLoader</code>. The queue lives in one process and its state file,
-        not in a distributed store. Proxies come from your list: it does not buy or find them for you.</p>
+      <p class="honest"><b>What it is not.</b> The engine itself does not run JavaScript: pages built in the browser go through
+        <code>z3l.Scraper.<wbr>Playwright</code> or a scraping API. The queue lives in one process and its state file, not in a
+        distributed store. Proxies come from your list or the scraping service you pay: it does not buy or find them for you.</p>
     </div>
   </section>
 
@@ -209,7 +225,7 @@
         </details>
         <details>
           <summary>Does it run JavaScript?</summary>
-          <p>No. The built-in loader is HttpClient. For pages built by scripts, implement <code>IPageLoader</code> with Playwright, Selenium or a remote browser farm; the queue, checks and retries stay the same.</p>
+          <p>Not by itself: the built-in loaders use HttpClient. For pages built by scripts, add <code>z3l.Scraper.<wbr>Playwright</code> (Chromium, Firefox or WebKit, a browser context per proxy), or load them through ScrapingBee with <code>z3l.Scraper.<wbr>Loaders.<wbr>ScrapingBee</code> and <code>RenderJs</code>. The queue, checks and retries stay the same.</p>
         </details>
         <details>
           <summary>What happens if my process crashes?</summary>
@@ -221,7 +237,7 @@
         </details>
         <details>
           <summary>Does the library phone home or check a license key?</summary>
-          <p>No. There is no license key, no telemetry and no network access other than the pages you load.</p>
+          <p>No. There is no license key, no telemetry and no network access other than the pages you load, through the proxies or the scraping API you set.</p>
         </details>
       </div>
     </div>

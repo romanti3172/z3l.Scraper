@@ -11,7 +11,7 @@ using var playwright = await Playwright.CreateAsync();
 await using var browser = await playwright.Chromium.LaunchAsync();
 var page = await browser.NewPageAsync(new() { ViewportSize = new() { Width = 256, Height = 256 } });
 
-foreach (var name in new[] { "icon", "icon-playwright" })
+foreach (var name in new[] { "icon", "icon-playwright", "icon-service" })
 {
     var svg = await File.ReadAllTextAsync(Path.Combine(dir, name + ".svg"));
     await page.SetContentAsync($"<html><body style=\"margin:0;background:transparent\">{svg}</body></html>");

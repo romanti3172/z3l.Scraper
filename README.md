@@ -43,6 +43,8 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 
 ```
 dotnet add package z3l.Scraper --prerelease
+dotnet add package z3l.Scraper.Playwright --prerelease            # pages in a headless browser
+dotnet add package z3l.Scraper.Loaders.ScrapingBee --prerelease   # pages through the ScrapingBee API
 ```
 
 ## Quick start
@@ -673,7 +675,7 @@ request as soon as it is accepted (the queue can be of any length), `MaxConcurre
 once, and `RequestTimeout` does not apply: the loader finds lost loads itself. When more than `MaxLoadedNotHandled` (100)
 loaded pages wait for a handler, the scraper sets the loader's `Paused`, and the answers wait in the queue instead of the
 memory. [z3l.Scraper.RabbitMQ](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.RabbitMQ/README.md)
-is such a loader on RabbitMQ, with the workers for it.
+is such a loader on RabbitMQ, with the workers for it; it is not on NuGet yet.
 
 ### Remote loaders
 
@@ -721,9 +723,10 @@ public sealed class MyServiceLoader(string apiKey) : ServicePageLoader(new Servi
   through. `CallAsync` calls `LevelUp` itself when the service says the site resisted. `Credits` sums what `AddCredits`
   counted, and `ToString()` shows it with the counters.
 
-Such loaders come one package per service:
+Such loaders come one package per service. The ScrapingBee one is on NuGet; the others wait in the repository until they
+are checked against the real API:
 - [z3l.Scraper.Loaders.ScrapingBee](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ScrapingBee/README.md),
-  `new ScrapingBeePageLoader(new() { ApiKey = ..., MaxConcurrency = 10 })`;
+  `new ScrapingBeePageLoader(new() { ApiKey = ..., MaxConcurrency = 10 })`: checked against the real API;
 - [z3l.Scraper.Loaders.ScraperApi](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ScraperApi/README.md),
   `new ScraperApiPageLoader(new() { ApiKey = ..., MaxConcurrency = 5 })`: written from ScraperAPI's documentation, not yet run against the real API;
 - [z3l.Scraper.Loaders.ZenRows](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ZenRows/README.md),

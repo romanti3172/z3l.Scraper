@@ -1,11 +1,15 @@
 # z3l.Scraper.Loaders.ScrapingBee
 
 A page loader for [z3l.Scraper](https://github.com/romanti3172/z3l.Scraper) through [ScrapingBee](https://www.scrapingbee.com).
-ScrapingBee keeps the proxies, the browsers and the captchas; the scraper keeps the queue, the checks, the retries and the
-handlers. The loader is a `ServicePageLoader`: at most `MaxConcurrency` calls go at once (the plan's limit), no new call
-starts while the scraper's handlers are behind, and a page that comes back blocked is loaded again with stronger proxies.
+ScrapingBee keeps the proxies and the browsers; the scraper keeps the queue, the checks, the retries and the handlers.
+The loader is a `ServicePageLoader`: at most `MaxConcurrency` calls go at once (the plan's limit), no new call starts while
+the scraper's handlers are behind, and a page that comes back blocked is loaded again with stronger proxies.
 
 ## Use
+
+```
+dotnet add package z3l.Scraper.Loaders.ScrapingBee --prerelease
+```
 
 ```csharp
 await using var loader = new ScrapingBeePageLoader(new ScrapingBeePageLoaderOptions
