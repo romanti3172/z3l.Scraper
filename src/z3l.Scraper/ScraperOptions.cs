@@ -116,6 +116,19 @@ public sealed class ScraperOptions
     public bool RetryOnHandlerError { get; set; }
 
     /// <summary>
+    /// Handler errors in a row of one label on one host after which the run stops: the handler is broken (the site changed its pages, a
+    /// selector finds nothing), and every next page of the label would be loaded only to fail. A handler error is any exception of the
+    /// handler but <see cref="RetryRequestException"/> and <see cref="NonRetryableException"/>, each attempt counted
+    /// (<see cref="RetryOnHandlerError"/>); a page the handler takes starts the count again, so odd pages here and there do not stop the run.
+    /// <para>
+    /// The run stops as after <see cref="MaxRunDuration"/>, with <see cref="ScraperStats.StoppedByHandlerErrors"/>. With
+    /// <see cref="StatePath"/> the requests the handler failed in a row stay with the unfinished ones, so the run continued after the fix does
+    /// them again. Null, the default, for no limit.
+    /// </para>
+    /// </summary>
+    public int? MaxConsecutiveHandlerErrors { get; set; }
+
+    /// <summary>
     /// Items the consumer has not taken yet; when the buffer is full, workers wait before handing over more
     /// items, so a slow consumer slows the scraping down instead of filling the memory.
     /// </summary>
@@ -148,6 +161,10 @@ public sealed class ScraperOptions
         if (MaxRequests is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequests), MaxRequests, "Must be 1 or more");
         if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
         if (MaxDepth is < 0) throw new ArgumentOutOfRangeException(nameof(MaxDepth), MaxDepth, "Must be 0 or more");
+        if (MaxConsecutiveHandlerErrors is < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxConsecutiveHandlerErrors), MaxConsecutiveHandlerErrors, "Must be 1 or more");
+        }
         if (MaxThrottleDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxThrottleDelay), MaxThrottleDelay, "Must be positive");
         if (StateSaveInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(StateSaveInterval), StateSaveInterval, "Must be positive");
         if (RespectRobotsTxt && string.IsNullOrWhiteSpace(RobotsUserAgent)) throw new ArgumentException("RobotsUserAgent must not be empty", nameof(RobotsUserAgent));

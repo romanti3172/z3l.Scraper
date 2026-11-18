@@ -91,6 +91,9 @@ public sealed record ScrapeRequest
     /// <summary>The request already holds a load slot of its throttled host (it waited in the host's line).</summary>
     internal bool HasThrottleSlot { get; set; }
 
+    /// <summary><see cref="Scraper.CachingPageLoader"/> was asked for this request: its next loads go to the loader.</summary>
+    internal bool SkipCache { get; set; }
+
     /// <summary>With a state file: items of this page the consumer has not taken yet; the page stays in the file until it is 0.</summary>
     internal int UnackedItems;
 
