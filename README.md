@@ -642,7 +642,12 @@ public sealed class MyServiceLoader(string apiKey) : ServicePageLoader(new Servi
   `NonRetryableException` when another call cannot help. Any other exception of a call, such as a network error to the
   service, is a `RemoteLoadException`.
 - A page that comes back blocked is loaded again one level up, to `MaxLevel`, and the host goes on from the level that got
-  through. `Credits` sums what `AddCredits` counted, and `ToString()` shows it with the counters.
+  through. `CallAsync` calls `LevelUp` itself when the service says the site resisted. `Credits` sums what `AddCredits`
+  counted, and `ToString()` shows it with the counters.
+
+Such loaders come one package per service:
+[z3l.Scraper.Loaders.ScrapingBee](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ScrapingBee/README.md),
+`new ScrapingBeePageLoader(new() { ApiKey = ..., MaxConcurrency = 10 })`.
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,

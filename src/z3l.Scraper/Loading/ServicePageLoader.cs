@@ -167,12 +167,20 @@ public abstract class ServicePageLoader : QueuePageLoader, IBlockAwarePageLoader
     private static string? HostOf(string url) => Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Authority : null;
 
     /// <summary>The page came back blocked: the next call of the request goes one level up, up to <see cref="MaxLevel"/>.</summary>
-    public virtual void ReportBlocked(ScrapeRequest request, PageResponse response, string reason)
+    public virtual void ReportBlocked(ScrapeRequest request, PageResponse response, string reason) =>
+        LevelUp(request, _servedAt.TryGetValue(response, out var at) ? at.Value : LevelOf(request), reason);
+
+    /// <summary>
+    /// The site resisted the call at <paramref name="level"/>, as the service tells it (it could not scrape the page): the next call of
+    /// the request goes one level up, up to <see cref="MaxLevel"/>. Call it from <see cref="CallAsync"/> before throwing; a page that
+    /// comes back blocked does it by itself.
+    /// </summary>
+    protected void LevelUp(ScrapeRequest request, int level, string reason)
     {
-        var level = _servedAt.TryGetValue(response, out var at) ? at.Value : LevelOf(request);
+        ArgumentNullException.ThrowIfNull(request);
         if (level >= MaxLevel) return;
         _requestLevels.AddOrUpdate(request, new StrongBox<int>(level + 1));
-        Logger.LogDebug("{Url} was blocked at level {Level} ({Reason}): the next call goes at level {Next}", request.Url, level, reason, level + 1);
+        Logger.LogDebug("{Url} did not get through at level {Level} ({Reason}): the next call goes at level {Next}", request.Url, level, reason, level + 1);
     }
 
     /// <summary>The page got through: when it took a level above 0, its host goes on from that level.</summary>
