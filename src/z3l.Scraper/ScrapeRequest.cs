@@ -83,8 +83,10 @@ public sealed record ScrapeRequest
     public int? MaxRetries { get; init; }
 
     /// <summary>
-    /// Key used to skip duplicates. When omitted it is made of the method, the URL without the fragment
-    /// and the body, so POST requests to one URL with different bodies are different pages.
+    /// Key used to skip duplicates. When omitted it is made of the method, the URL without the fragment and with its query parameters
+    /// sorted by name, and the body: POST requests to one URL with different bodies are different pages, and <c>?b=2&amp;a=1</c> is the
+    /// page of <c>?a=1&amp;b=2</c> (parameters of one name keep their order). The order changes only the key: the URL is loaded as it
+    /// was found, less the <see cref="ScraperOptions.IgnoredQueryParameters"/>.
     /// </summary>
     public string? UniqueKey { get; init; }
 
@@ -125,7 +127,8 @@ public sealed record ScrapeRequest
         var url = Url;
         if (Uri.TryCreate(Url, UriKind.Absolute, out var uri))
         {
-            url = uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
+            // the order of the query parameters makes no other page; a URL with them sorted keeps the key it always had
+            url = UrlHelper.SortQuery(uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped));
         }
         return string.IsNullOrEmpty(Body) ? $"{Method.Method} {url}" : $"{Method.Method} {url} {Body}";
     }

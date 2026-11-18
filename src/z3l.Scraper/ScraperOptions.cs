@@ -6,8 +6,8 @@ namespace z3l.Scraper;
 public sealed class ScraperOptions
 {
     /// <summary>
-    /// Requests loaded and handled at the same time. With an <see cref="Loading.IQueuePageLoader"/> every request goes to the queue
-    /// at once, and this limits only the handlers that run at once.
+    /// Requests loaded and handled at the same time, of all hosts (<see cref="MaxConcurrencyPerHost"/> limits each host). With an
+    /// <see cref="Loading.IQueuePageLoader"/> every request goes to the queue at once, and this limits only the handlers that run at once.
     /// </summary>
     public int MaxConcurrency { get; set; } = 8;
 
@@ -54,6 +54,21 @@ public sealed class ScraperOptions
     public int? MaxRequestsPerMinute { get; set; }
 
     /// <summary>
+    /// Loads of one host (with its port) going at the same time, under <see cref="MaxConcurrency"/>. A request of a host that has this
+    /// many waits in the host's line, not in a worker, so the workers load other hosts meanwhile and a big site at its limit does not
+    /// hold back the rest of the queue. A load holds its slot until the loader answers, not while the handler runs. With an
+    /// <see cref="Loading.IQueuePageLoader"/> it limits the requests of a host in the loader's queue at once. Null, the default, for no limit.
+    /// </summary>
+    public int? MaxConcurrencyPerHost { get; set; }
+
+    /// <summary>
+    /// Least time between the starts of two loads of one host (with its port), each a random 0–50 % longer so the loads do not come
+    /// like a clock; requests of the host wait in its line meanwhile, not in a worker. A robots.txt Crawl-delay or a delay of
+    /// <see cref="AutoThrottle"/>, when longer, wins. Up to a day; zero, the default, for none.
+    /// </summary>
+    public TimeSpan HostDelay { get; set; }
+
+    /// <summary>
     /// With handlers of <see cref="Scraper.RequestsNeeded"/>: the event is raised when fewer requests than this are unfinished
     /// (queued, in progress or waiting for a retry, links found on pages included), and when none is left. 0: only when none is left.
     /// </summary>
@@ -68,6 +83,53 @@ public sealed class ScraperOptions
     public int? MaxDepth { get; set; }
 
     /// <summary>
+    /// Hosts whose links the run follows, each with its subdomains: "shop.example" takes shop.example, www.shop.example and
+    /// m.shop.example, but not othershop.example. A link to another host that a handler queues is skipped and counted in
+    /// <see cref="ScraperStats.OutOfScope"/>, so the crawl does not wander off to every site its pages link to. Empty, the default: links
+    /// to any host are followed.
+    /// <para>
+    /// Only the links found on pages are checked (<c>ScrapeContext.Enqueue</c>, <see cref="ScrapeContext.EnqueueSitemap"/>): start requests
+    /// and those of <see cref="Scraper.RequestsNeeded"/> are taken as given. Host names only, without a scheme, a port or a path; an
+    /// internationalized name may be written as it reads or in its xn-- form. Names ignore case.
+    /// </para>
+    /// </summary>
+    public ICollection<string> AllowedHosts { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Which links found on pages the run follows, asked after <see cref="AllowedHosts"/>: false skips the link, counted in
+    /// <see cref="ScraperStats.OutOfScope"/>. It gets the absolute URL without <see cref="IgnoredQueryParameters"/>, for example
+    /// <c>url =&gt; !url.AbsolutePath.StartsWith("/blog/")</c>. It runs in the handler that queues the link, so on several threads at once,
+    /// and what it throws fails that handler. Start requests and those of <see cref="Scraper.RequestsNeeded"/> are taken as given.
+    /// Null, the default, takes every link.
+    /// </summary>
+    public Func<Uri, bool>? UrlFilter { get; set; }
+
+    /// <summary>
+    /// Query parameters dropped from the URL of every request the run takes: names, or prefixes that end in '*'; names ignore case. Links
+    /// that differ only by them are one page, loaded once and without them, and <see cref="ScrapeRequest.Url"/> and the items have the
+    /// clean URL. By default the tracking parameters of ads, mail and analytics: <c>utm_*</c>, those of Google (<c>gclid</c>,
+    /// <c>gclsrc</c>, <c>dclid</c>, <c>gbraid</c>, <c>wbraid</c>, <c>srsltid</c>, <c>_ga</c>, <c>_gl</c>), Meta (<c>fbclid</c>,
+    /// <c>igshid</c>), Microsoft (<c>msclkid</c>), Yandex (<c>yclid</c>, <c>ysclid</c>), TikTok (<c>ttclid</c>), X (<c>twclid</c>),
+    /// Mailchimp (<c>mc_cid</c>, <c>mc_eid</c>) and HubSpot (<c>_hsenc</c>, <c>_hsmi</c>). Add those of sessions ("sessionid"), or
+    /// <c>Clear()</c> it to load URLs as they are.
+    /// </summary>
+    public ICollection<string> IgnoredQueryParameters { get; } = new HashSet<string>(TrackingParameters, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The default <see cref="IgnoredQueryParameters"/>.</summary>
+    internal static readonly string[] TrackingParameters =
+    [
+        "utm_*",
+        "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "srsltid", "_ga", "_gl",
+        "fbclid", "igshid",
+        "msclkid",
+        "yclid", "ysclid",
+        "ttclid",
+        "twclid",
+        "mc_cid", "mc_eid",
+        "_hsenc", "_hsmi",
+    ];
+
+    /// <summary>
     /// Slows down a host that is overloaded or blocks: after a 429 or 503, or a blocked response, all requests to that host
     /// wait in a line and load one at a time with a delay that doubles with each such answer (up to <see cref="MaxThrottleDelay"/>)
     /// and shrinks again with successful loads. A Retry-After header pauses the whole host.
@@ -80,7 +142,10 @@ public sealed class ScraperOptions
     /// </summary>
     public bool AutoThrottle { get; set; }
 
-    /// <summary>Longest delay between loads of a throttled host (and the longest robots.txt Crawl-delay honoured).</summary>
+    /// <summary>
+    /// Longest delay between loads of a throttled host (and the longest robots.txt Crawl-delay honoured). It does not cut
+    /// <see cref="HostDelay"/>.
+    /// </summary>
     public TimeSpan MaxThrottleDelay { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
@@ -168,6 +233,11 @@ public sealed class ScraperOptions
         }
         if (MaxRequests is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequests), MaxRequests, "Must be 1 or more");
         if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
+        if (MaxConcurrencyPerHost is < 1) throw new ArgumentOutOfRangeException(nameof(MaxConcurrencyPerHost), MaxConcurrencyPerHost, "Must be 1 or more");
+        if (HostDelay < TimeSpan.Zero || HostDelay > TimeSpan.FromDays(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(HostDelay), HostDelay, "Must be from zero to a day");
+        }
         if (RequestsNeededBelow < 0) throw new ArgumentOutOfRangeException(nameof(RequestsNeededBelow), RequestsNeededBelow, "Must be 0 or more");
         if (MaxDepth is < 0) throw new ArgumentOutOfRangeException(nameof(MaxDepth), MaxDepth, "Must be 0 or more");
         if (MaxConsecutiveHandlerErrors is < 1)
@@ -177,5 +247,7 @@ public sealed class ScraperOptions
         if (MaxThrottleDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxThrottleDelay), MaxThrottleDelay, "Must be positive");
         if (StateSaveInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(StateSaveInterval), StateSaveInterval, "Must be positive");
         if (RespectRobotsTxt && string.IsNullOrWhiteSpace(RobotsUserAgent)) throw new ArgumentException("RobotsUserAgent must not be empty", nameof(RobotsUserAgent));
+        foreach (var host in AllowedHosts) Crawling.CrawlScope.HostName(host);
+        foreach (var name in IgnoredQueryParameters) QueryParameterSet.Check(name);
     }
 }
