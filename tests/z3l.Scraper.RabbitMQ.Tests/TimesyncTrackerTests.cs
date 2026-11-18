@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.Extensions.Time.Testing;
+using z3l.Scraper.Loading;
 
 [assembly: Parallelize(Scope = ExecutionScope.MethodLevel)]
 

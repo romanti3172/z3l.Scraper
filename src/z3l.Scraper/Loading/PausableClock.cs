@@ -1,4 +1,4 @@
-namespace z3l.Scraper.RabbitMQ;
+namespace z3l.Scraper.Loading;
 
 /// <summary>
 /// A clock that stands still while the loader is paused: answers wait in the broker (or in the client's buffer) then, so that
