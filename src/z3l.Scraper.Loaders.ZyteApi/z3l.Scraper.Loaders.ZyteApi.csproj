@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- shared settings and the version: ..\Directory.Build.props -->
+
+  <PropertyGroup>
+    <RootNamespace>z3l.Scraper.Loaders.ZyteApi</RootNamespace>
+    <AssemblyName>z3l.Scraper.Loaders.ZyteApi</AssemblyName>
+    <!-- the JSON of the calls is written and read without reflection: the analyzers check it -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <!-- not published yet: it has not met the real API -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>z3l.Scraper.Loaders.ZyteApi</PackageId>
+    <Description>A page loader for z3l.Scraper through Zyte API: its ban handling, proxies and browsers, called a page at a time within the plan's limit; a page that comes back blocked, or that Zyte API could not get past a ban, is loaded again in a browser.</Description>
+    <PackageTags>scraper;web-scraping;crawler;zyte;zyte-api;scraping-api;proxy;headless-browser;dotnet;net9;net10</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\z3l.Scraper\z3l.Scraper.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="z3l.Scraper.Loaders.ZyteApi.Tests" />
+  </ItemGroup>
+
+</Project>
