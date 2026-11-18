@@ -31,6 +31,17 @@ public sealed record ScrapeRequest
         Label = label.Name;
     }
 
+    /// <summary>
+    /// A request from a <see cref="Scraper.RequestsNeeded"/> source by its URL alone. The URL is not checked here: the run fails
+    /// an empty or bad one with <see cref="FailureReason.BadUrl"/> instead of throwing.
+    /// </summary>
+    internal ScrapeRequest(string? url, ScrapeLabel label, bool skipDuplicateCheck)
+    {
+        Url = url ?? "";
+        Label = label.Name;
+        SkipDuplicateCheck = skipDuplicateCheck;
+    }
+
     /// <summary>Creates a request with data for a typed handler.</summary>
     /// <param name="url">Absolute URL.</param>
     /// <param name="label">Handler label.</param>
@@ -77,7 +88,10 @@ public sealed record ScrapeRequest
     /// </summary>
     public string? UniqueKey { get; init; }
 
-    /// <summary>Load the page even if a request with the same key was already queued.</summary>
+    /// <summary>
+    /// Load the page even if a request with the same key was already queued in this run: normally such a request is skipped
+    /// as a duplicate. The request is not remembered either, so a later request with the same key is queued too.
+    /// </summary>
     public bool SkipDuplicateCheck { get; init; }
 
     /// <summary>Number of load attempts made so far (1 in the first handler call).</summary>

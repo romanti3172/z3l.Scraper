@@ -159,6 +159,117 @@ public sealed class RequestsNeededTests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task NoUrl_FailsWithBadUrl_AndCountsAsGiven()
+    {
+        var options = ScraperTests.FastOptions();
+        options.RequestsNeededBelow = 0;                                    // raised only when nothing is left
+        var calls = 0;
+        var scraper = ItemScraper(options);
+        scraper.RequestsNeeded += e =>
+        {
+            switch (++calls)
+            {
+                case 1:                                                     // rows with no URL
+                    Assert.IsFalse(e.Add((string?)null));
+                    Assert.AreEqual(0, e.Add(new[] { "", " " }));
+                    break;
+                case 2:
+                    Assert.IsTrue(e.Add(Url(1)));
+                    break;
+            }
+            return Task.CompletedTask;
+        };
+
+        var result = await scraper.RunToListAsync();
+
+        Assert.AreEqual(3, calls, "rows with no URL count as given, so the table is read again");
+        CollectionAssert.AreEqual(new[] { Url(1) }, result.Items.Cast<string>().ToArray());
+        Assert.HasCount(3, result.Failed);
+        Assert.IsTrue(result.Failed.All(f => f.Reason == FailureReason.BadUrl));
+        Assert.AreEqual(0, scraper.Stats.Pending);
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task UrlsWithALabel_AreQueued_AndDuplicatesSkipped()
+    {
+        var given = false;
+        var scraper = ItemScraper(ScraperTests.FastOptions()).Route(PageType.Item, ctx => ctx.Emit("item " + ctx.Request.Url));
+        scraper.RequestsNeeded += e =>
+        {
+            if (!given)
+            {
+                given = true;
+                Assert.AreEqual(2, e.Add(new[] { Url(1), Url(2), Url(1) }, PageType.Item));
+                Assert.IsFalse(e.Add(Url(2), PageType.Item));
+            }
+            return Task.CompletedTask;
+        };
+
+        var result = await scraper.RunToListAsync();
+
+        CollectionAssert.AreEquivalent(new[] { "item " + Url(1), "item " + Url(2) }, result.Items.Cast<string>().ToArray());
+        Assert.AreEqual(2, scraper.Stats.Duplicates);
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task SkipDuplicateCheck_LoadsAPageGivenAgain()
+    {
+        var options = ScraperTests.FastOptions();
+        options.RequestsNeededBelow = 0;                                    // raised only when nothing is left
+        var calls = 0;
+        var queued = new List<bool>();
+        var scraper = ItemScraper(options);
+        scraper.RequestsNeeded += e =>
+        {
+            switch (++calls)
+            {
+                case 1: queued.Add(e.Add(Url(1))); break;
+                case 2: queued.Add(e.Add(Url(1))); break;                                  // a duplicate: not loaded
+                case 3: queued.Add(e.Add(Url(1), skipDuplicateCheck: true)); break;        // loaded again
+                case 4: queued.Add(e.Add(new[] { Url(1), Url(1) }, skipDuplicateCheck: true) == 2); break;
+            }
+            return Task.CompletedTask;
+        };
+
+        var result = await scraper.RunToListAsync();
+
+        CollectionAssert.AreEqual(new[] { true, false, true, true }, queued);
+        CollectionAssert.AreEqual(Enumerable.Repeat(Url(1), 4).ToArray(), result.Items.Cast<string>().ToArray());
+        Assert.AreEqual(4, scraper.Stats.Loads);
+        Assert.AreEqual(1, scraper.Stats.Duplicates);
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task SkipDuplicateCheck_DoesNotRememberThePage()
+    {
+        var given = false;
+        var options = ScraperTests.FastOptions();
+        var loader = new DelegateLoader((r, _) => Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html("ok"))));
+        var scraper = new Scraper(loader, options)
+            .Route("default", ctx => ctx.Emit(ctx.Request.Url))
+            .Route("listing", ctx => ctx.Enqueue(Url(1)));
+        scraper.RequestsNeeded += e =>
+        {
+            if (!given)
+            {
+                given = true;
+                e.Add(Url(1), skipDuplicateCheck: true);
+                e.Add("https://s.test/listing", "listing");
+            }
+            return Task.CompletedTask;
+        };
+
+        var result = await scraper.RunToListAsync();
+
+        CollectionAssert.AreEqual(new[] { Url(1), Url(1) }, result.Items.Cast<string>().ToArray(),
+            "the link from the listing is not a duplicate of a page given with skipDuplicateCheck");
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task HandlerException_EndsTheRunWithIt()
     {
         var calls = 0;
