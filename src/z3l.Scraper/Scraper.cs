@@ -119,6 +119,13 @@ public sealed class Scraper
     /// <summary>Counters of the current or the last run.</summary>
     public ScraperStats Stats => _lastRun?.Stats ?? new ScraperStats();
 
+    /// <summary>
+    /// The requests of the current or the last run that failed, in the order they failed: what <see cref="ScrapeResult.Failed"/> holds,
+    /// also for a run read with <see cref="RunAsync(IEnumerable{ScrapeRequest}, CancellationToken)"/>. Each of them was passed to
+    /// <see cref="RequestFailed"/> too.
+    /// </summary>
+    public IReadOnlyList<FailedRequest> FailedRequests => _lastRun is { } run ? [.. run.FailedRequests] : [];
+
     /// <summary>Called for every request that fails (after its retries). Called from worker threads.</summary>
     public event Action<FailedRequest>? RequestFailed;
 

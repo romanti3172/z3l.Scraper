@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -184,7 +185,9 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         {
             Stats.Stop();
             if (_statePath != null) await FinishStateAsync().ConfigureAwait(false);
-            Logger.LogInformation("Scraping finished: {Stats}", Stats);
+            var reasons = Stats.Reasons;
+            if (reasons.Count == 0) Logger.LogInformation("Scraping finished: {Stats}", Stats);
+            else Logger.LogInformation("Scraping finished: {Stats}. Top reasons: {Reasons}", Stats, string.Join("; ", reasons.Take(5)));
             _items.Writer.TryComplete(error);
         }
     }
@@ -317,6 +320,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         if (UrlHelper.TryNormalize(request.Url, out _)) return Enqueue(request, parent: null);
 
         Stats.AddEnqueued();        // accepted and failed at once, so Pending stays right
+        Note(new Trouble(ReasonKind.BadUrl, "not an absolute http(s) URL", request.Url), request, failed: true);
         RecordFailure(new FailedRequest(request, FailureReason.BadUrl, $"not an absolute http(s) URL: \"{request.Url}\"", null, null));
         return false;
     }
@@ -442,6 +446,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         catch (Exception ex)
         {
             Logger.LogError(ex, "Internal error on {Url}", request.Url);
+            Note(new Trouble(ReasonKind.HandlerError, $"internal error: {ex.GetType().Name}", ex.Message), request, failed: true);
             Fail(request, FailureReason.HandlerError, $"internal error: {ex.Message}", null, ex);
         }
         finally
@@ -503,6 +508,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             var robots = await _robots.GetAsync(uri).ConfigureAwait(false);
             if (!robots.IsAllowed(uri, _options.RobotsUserAgent))
             {
+                Note(new Trouble(ReasonKind.DisallowedByRobotsTxt, "disallowed", "disallowed by robots.txt"), request, failed: true);
                 Fail(request, FailureReason.DisallowedByRobotsTxt, "disallowed by robots.txt", null, null);
                 return;
             }
@@ -536,6 +542,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         {
             ValidationResult verdict;
             Exception? loadError = null;
+            Trouble? loadTrouble = null;
 
             if (fromCache)
             {
@@ -561,6 +568,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 }
                 catch (NonRetryableException ex) when (!token.IsCancellationRequested)
                 {
+                    Note(new Trouble(ReasonKind.NonRetryable, Short(ex.Message), ex.Message), request, failed: true);
                     Fail(request, FailureReason.NonRetryable, ex.Message, response?.StatusCode, ex);
                     return;
                 }
@@ -569,6 +577,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     loadError = ex;
                     var timedOut = ex is OperationCanceledException && !queued;
                     if (timedOut) ReportTimeout(loader, request);
+                    loadTrouble = LoadTrouble(ex, timedOut);
                     verdict = timedOut
                         ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
                         : ValidationResult.Retry($"load error: {ex.Message}");
@@ -610,6 +619,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 case ValidationOutcome.NotFound:
                     await SnapshotAsync(request, response, SnapshotKind.NotFound, verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
                     request.NotFoundCount++;
+                    Note(new Trouble(ReasonKind.NotFound, verdict.Reason!), request, failed: request.NotFoundCount > _options.NotFoundRetries);
                     if (request.NotFoundCount <= _options.NotFoundRetries)
                     {
                         ScheduleRetry(request, verdict.Reason!, null);
@@ -623,7 +633,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 case ValidationOutcome.Blocked:
                     await SnapshotAsync(request, response, SnapshotKind.Blocked, verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
                     ReportBlocked(loader, request, response, verdict.Reason!);
-                    RetryOrFail(request, $"blocked: {verdict.Reason}", response, null);
+                    RetryOrFail(request, new Trouble(ReasonKind.Blocked, verdict.Reason!), $"blocked: {verdict.Reason}", response, null);
                     break;
 
                 default:
@@ -634,7 +644,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     {
                         ReportBadResponse(loader, request, response, verdict.Reason!);
                     }
-                    RetryOrFail(request, verdict.Reason!, response, loadError);
+                    RetryOrFail(request, loadTrouble ?? new Trouble(ReasonKind.BadPage, verdict.Reason!), verdict.Reason!, response, loadError);
                     break;
             }
         }
@@ -681,22 +691,26 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     {
                         ReportBadResponse(loader, request, response, $"handler: {retry.Message}");
                     }
-                    RetryOrFail(request, $"handler asked to retry: {retry.Message}", response, retry);
+                    RetryOrFail(request, new Trouble(retry.Blocked ? ReasonKind.Blocked : ReasonKind.BadPage, $"handler: {Short(retry.Message)}", retry.Message),
+                        $"handler asked to retry: {retry.Message}", response, retry);
                     break;
                 case NonRetryableException nonRetryable:
                     await SnapshotAsync(request, response, SnapshotKind.HandlerError, nonRetryable.Message, nonRetryable, fromCache, token).ConfigureAwait(false);
+                    Note(new Trouble(ReasonKind.NonRetryable, Short(nonRetryable.Message), nonRetryable.Message), request, failed: true);
                     Fail(request, FailureReason.NonRetryable, nonRetryable.Message, response.StatusCode, nonRetryable);
                     break;
                 default:
                     await SnapshotAsync(request, response, SnapshotKind.HandlerError, ex.Message, ex, fromCache, token).ConfigureAwait(false);
                     NoteHandlerError(request, host, ex);
+                    var trouble = new Trouble(ReasonKind.HandlerError, ex.GetType().Name, ex.Message);
                     if (_options.RetryOnHandlerError)
                     {
                         Logger.LogDebug(ex, "Handler \"{Label}\" failed on {Url}", request.Label, request.Url);
-                        RetryOrFail(request, $"handler error: {ex.Message}", response, ex, FailureReason.HandlerError);
+                        RetryOrFail(request, trouble, $"handler error: {ex.Message}", response, ex, FailureReason.HandlerError);
                     }
                     else
                     {
+                        Note(trouble, request, failed: true);
                         Fail(request, FailureReason.HandlerError, ex.Message, response.StatusCode, ex);
                     }
                     break;
@@ -834,9 +848,11 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         _ => SnapshotKind.Retry,
     };
 
-    private void RetryOrFail(ScrapeRequest request, string reason, PageResponse? response, Exception? error, FailureReason reasonWhenOut = FailureReason.RetriesExhausted)
+    private void RetryOrFail(ScrapeRequest request, Trouble trouble, string reason, PageResponse? response, Exception? error,
+        FailureReason reasonWhenOut = FailureReason.RetriesExhausted)
     {
         var maxRetries = request.MaxRetries ?? _options.MaxRetries;
+        Note(trouble, request, failed: request.Attempts > maxRetries);
         if (request.Attempts <= maxRetries)
         {
             ScheduleRetry(request, reason, RetryAfter(response));
@@ -935,6 +951,58 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             "Failed {Url} ({Label}): {Reason}, {Message}", failed.Request.Url, failed.Request.Label, failed.Reason, failed.Message);
 
         _scraper.RaiseRequestFailed(failed);
+    }
+
+    // ---------------------------------------------------------------- reasons
+
+    /// <summary>
+    /// Why an attempt gave no page, as <see cref="ScraperStats.Reasons"/> groups it: a reason that is the same for alike attempts, and
+    /// the message of this one.
+    /// </summary>
+    private readonly record struct Trouble(ReasonKind Kind, string Reason, string Example)
+    {
+        public Trouble(ReasonKind kind, string reason) : this(kind, reason, reason) { }
+    }
+
+    /// <summary>Counts an attempt that gave no page in its group of <see cref="ScraperStats.Reasons"/>; failed: it was the last one.</summary>
+    private void Note(Trouble trouble, ScrapeRequest request, bool failed)
+    {
+        var host = Uri.TryCreate(request.Url, UriKind.Absolute, out var uri) ? uri.Authority : "";
+        Stats.AddReason(trouble.Kind, trouble.Reason, request.Label, host, failed, trouble.Example, request.Url);
+    }
+
+    /// <summary>A load that threw: a timeout, or a load error by its kind, not by its message (which names the proxy, the IP...).</summary>
+    private Trouble LoadTrouble(Exception error, bool timedOut) => timedOut
+        ? new Trouble(ReasonKind.Timeout, string.Create(CultureInfo.InvariantCulture, $"{_options.RequestTimeout.TotalSeconds:0.###} s"), error.Message)
+        : new Trouble(ReasonKind.LoadError, LoadErrorKind(error), error.Message);
+
+    /// <summary>
+    /// The kind of a load error, the same for every load that failed alike: what <see cref="HttpRequestException"/> says went wrong
+    /// (ConnectionError, ProxyTunnelError, SecureConnectionError...), the socket error, or the type of the exception.
+    /// </summary>
+    internal static string LoadErrorKind(Exception error)
+    {
+        for (var e = error; e != null; e = e.InnerException)
+        {
+            switch (e)
+            {
+                case HttpRequestException { HttpRequestError: not HttpRequestError.Unknown } http:
+                    return http.HttpRequestError.ToString();
+                case SocketException socket:
+                    return $"socket {socket.SocketErrorCode}";
+            }
+        }
+        return error.GetType().Name;
+    }
+
+    /// <summary>The first line of a message, at most 100 characters: a reason made of a message stays short.</summary>
+    private static string Short(string message)
+    {
+        var line = message.AsSpan();
+        var end = line.IndexOfAny('\r', '\n');
+        if (end >= 0) line = line[..end];
+        line = line.Trim();
+        return line.Length <= 100 ? line.ToString() : string.Concat(line[..99], "…");
     }
 
     // ---------------------------------------------------------------- broken handlers
