@@ -249,8 +249,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         // own copy: the caller may reuse its instance
         request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, RateLimitCount = 0, Depth = depth, HasThrottleSlot = false,
             SkipCache = false };
-        // hashed before the lock: the SHA-256 of a long POST body takes a while
-        KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey());
+        // hashed before the lock: the SHA-256 of a long POST body takes a while. The key is made of the Uri above, not of the URL parsed again
+        KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey(uri));
 
         lock (_seen)
         {

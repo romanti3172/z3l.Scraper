@@ -6,7 +6,7 @@ using System.Text;
 namespace z3l.Scraper;
 
 /// <summary>
-/// Hash of a request key (<see cref="ScrapeRequest.GetUniqueKey"/>): the first 16 bytes of the SHA-256 of the key in UTF-8. The set of
+/// Hash of a request key (<see cref="ScrapeRequest.GetUniqueKey()"/>): the first 16 bytes of the SHA-256 of the key in UTF-8. The set of
 /// the pages seen and the state file keep it instead of the key, so a page takes 16 bytes there whatever the length of its URL and body.
 /// 128 bits, because nothing checks the key behind a hash: two keys with one hash would skip a page as a duplicate, unnoticed.
 /// </summary>

@@ -126,16 +126,24 @@ public sealed record ScrapeRequest
     /// <summary>With a state file: items of this page the consumer has not taken yet; the page stays in the file until it is 0.</summary>
     internal int UnackedItems;
 
-    internal string GetUniqueKey()
+    /// <summary>The key of duplicates (<see cref="UniqueKey"/>), <see cref="Url"/> parsed for it.</summary>
+    internal string GetUniqueKey() => GetUniqueKey(parsed: null);
+
+    /// <summary>
+    /// The key of duplicates (<see cref="UniqueKey"/>) of <see cref="Url"/> parsed already: a link found on a page is not parsed once
+    /// more for its key. The Uri is taken only when it was parsed from <see cref="Url"/> itself: a parse that changed its string, escaping
+    /// a broken '%' as %25, may keep the other escapes as it found them (<c>%7e</c>), and the parse of <see cref="Url"/> makes them
+    /// canonical (<c>~</c>), as the key always had them.
+    /// </summary>
+    /// <param name="parsed">The URL as a Uri; null or another one parses <see cref="Url"/>.</param>
+    internal string GetUniqueKey(Uri? parsed)
     {
         if (!string.IsNullOrEmpty(UniqueKey)) return UniqueKey;
 
-        var url = Url;
-        if (Uri.TryCreate(Url, UriKind.Absolute, out var uri))
-        {
-            // the order of the query parameters makes no other page; a URL with them sorted keeps the key it always had
-            url = UrlHelper.SortQuery(uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped));
-        }
+        var uri = parsed is { IsAbsoluteUri: true } && parsed.OriginalString == Url ? parsed
+            : Uri.TryCreate(Url, UriKind.Absolute, out var again) ? again : null;
+        // the order of the query parameters makes no other page; a URL with them sorted keeps the key it always had
+        var url = uri == null ? Url : UrlHelper.SortQuery(uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped));
         return string.IsNullOrEmpty(Body) ? $"{Method.Method} {url}" : $"{Method.Method} {url} {Body}";
     }
 
