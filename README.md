@@ -144,7 +144,7 @@ long lastId = 0;
 scraper.RequestsNeeded += async e =>
 {
     var rows = await db.ProductsAfterAsync(lastId, take: 1000, e.CancellationToken);   // WHERE id > @lastId ORDER BY id LIMIT 1000
-    foreach (var row in rows) e.Add(new ScrapeRequest(row.Url, PageType.Item));
+    foreach (var row in rows) e.Add(row.Url, PageType.Item);
     if (rows.Count > 0) lastId = rows[^1].Id;
 };
 
@@ -158,8 +158,12 @@ await foreach (var item in scraper.RunAsync()) { ... }
 - A call that adds nothing means the source is empty for now: in the middle of the run the next call comes when nothing is
   left, and when nothing is left and a call adds nothing, the run ends. Requests passed to `e.Add` count even when they are
   duplicates, so a handler that gives the same rows again is called again.
-- `e.Add` queues a request as a start request and returns false for a duplicate or over `MaxRequests`. A URL that is not an
-  absolute http(s) URL does not throw: its request fails with `FailureReason.BadUrl`.
+- `e.Add` queues a page as a start request and returns false for a duplicate or over `MaxRequests`. A URL that is not an
+  absolute http(s) URL, an empty one included, does not throw: its request fails with `FailureReason.BadUrl`. It takes a URL
+  and a label, a list of URLs with one label, or a `ScrapeRequest` for a POST, headers or data.
+- A page already queued in this run is skipped as a duplicate. A source that gives a page out again, for example to check a
+  price once more, passes `skipDuplicateCheck: true`: `e.Add(row.Url, PageType.Item, skipDuplicateCheck: true)` queues it
+  even if this run has loaded it. Such a page is not remembered either, so a link to it found later is queued too.
 - The event is not raised after `MaxRequests` is reached or when the run stops (`MaxRunDuration`, cancellation, `break`);
   `e.CancellationToken` cancels a call that goes then. An exception of a handler ends the run with it.
 - Start requests passed to `RunAsync` are taken as before. Several handlers are called one after another with the same `e`.
