@@ -68,6 +68,53 @@ public sealed class ScraperOptions
     public int? MaxDepth { get; set; }
 
     /// <summary>
+    /// Hosts whose links the run follows, each with its subdomains: "shop.example" takes shop.example, www.shop.example and
+    /// m.shop.example, but not othershop.example. A link to another host that a handler queues is skipped and counted in
+    /// <see cref="ScraperStats.OutOfScope"/>, so the crawl does not wander off to every site its pages link to. Empty, the default: links
+    /// to any host are followed.
+    /// <para>
+    /// Only the links found on pages are checked (<c>ScrapeContext.Enqueue</c>, <see cref="ScrapeContext.EnqueueSitemap"/>): start requests
+    /// and those of <see cref="Scraper.RequestsNeeded"/> are taken as given. Host names only, without a scheme, a port or a path; an
+    /// internationalized name may be written as it reads or in its xn-- form. Names ignore case.
+    /// </para>
+    /// </summary>
+    public ICollection<string> AllowedHosts { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Which links found on pages the run follows, asked after <see cref="AllowedHosts"/>: false skips the link, counted in
+    /// <see cref="ScraperStats.OutOfScope"/>. It gets the absolute URL without <see cref="IgnoredQueryParameters"/>, for example
+    /// <c>url =&gt; !url.AbsolutePath.StartsWith("/blog/")</c>. It runs in the handler that queues the link, so on several threads at once,
+    /// and what it throws fails that handler. Start requests and those of <see cref="Scraper.RequestsNeeded"/> are taken as given.
+    /// Null, the default, takes every link.
+    /// </summary>
+    public Func<Uri, bool>? UrlFilter { get; set; }
+
+    /// <summary>
+    /// Query parameters dropped from the URL of every request the run takes: names, or prefixes that end in '*'; names ignore case. Links
+    /// that differ only by them are one page, loaded once and without them, and <see cref="ScrapeRequest.Url"/> and the items have the
+    /// clean URL. By default the tracking parameters of ads, mail and analytics: <c>utm_*</c>, those of Google (<c>gclid</c>,
+    /// <c>gclsrc</c>, <c>dclid</c>, <c>gbraid</c>, <c>wbraid</c>, <c>srsltid</c>, <c>_ga</c>, <c>_gl</c>), Meta (<c>fbclid</c>,
+    /// <c>igshid</c>), Microsoft (<c>msclkid</c>), Yandex (<c>yclid</c>, <c>ysclid</c>), TikTok (<c>ttclid</c>), X (<c>twclid</c>),
+    /// Mailchimp (<c>mc_cid</c>, <c>mc_eid</c>) and HubSpot (<c>_hsenc</c>, <c>_hsmi</c>). Add those of sessions ("sessionid"), or
+    /// <c>Clear()</c> it to load URLs as they are.
+    /// </summary>
+    public ICollection<string> IgnoredQueryParameters { get; } = new HashSet<string>(TrackingParameters, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The default <see cref="IgnoredQueryParameters"/>.</summary>
+    internal static readonly string[] TrackingParameters =
+    [
+        "utm_*",
+        "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "srsltid", "_ga", "_gl",
+        "fbclid", "igshid",
+        "msclkid",
+        "yclid", "ysclid",
+        "ttclid",
+        "twclid",
+        "mc_cid", "mc_eid",
+        "_hsenc", "_hsmi",
+    ];
+
+    /// <summary>
     /// Slows down a host that is overloaded or blocks: after a 429 or 503, or a blocked response, all requests to that host
     /// wait in a line and load one at a time with a delay that doubles with each such answer (up to <see cref="MaxThrottleDelay"/>)
     /// and shrinks again with successful loads. A Retry-After header pauses the whole host.
@@ -177,5 +224,7 @@ public sealed class ScraperOptions
         if (MaxThrottleDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxThrottleDelay), MaxThrottleDelay, "Must be positive");
         if (StateSaveInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(StateSaveInterval), StateSaveInterval, "Must be positive");
         if (RespectRobotsTxt && string.IsNullOrWhiteSpace(RobotsUserAgent)) throw new ArgumentException("RobotsUserAgent must not be empty", nameof(RobotsUserAgent));
+        foreach (var host in AllowedHosts) Crawling.CrawlScope.HostName(host);
+        foreach (var name in IgnoredQueryParameters) QueryParameterSet.Check(name);
     }
 }

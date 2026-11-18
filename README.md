@@ -21,6 +21,8 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 - **Politeness and limits.** A host that answers 429 / 503 or blocks is slowed down by itself while other hosts keep
   full speed; robots.txt and its Crawl-delay on request; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
   `MaxDepth`, `MaxRunDuration`.
+- **Crawl scope.** `AllowedHosts` and `UrlFilter` keep the crawl on the sites and the parts of them you name; links that
+  differ only by tracking parameters (`utm_*`, `gclid`...) or by the order of their parameters are one page.
 - **Sitemaps.** Sitemap indexes, gzipped and text sitemaps in one call: `ctx.EnqueueSitemap(PageType.Item)`.
 - **Runs that survive a crash.** With `StatePath` the queue is saved as it goes and the next run continues;
   pages in work or not taken yet are done again, nothing is lost.
@@ -71,7 +73,8 @@ record Book(string? Title, string? Price, string Url);
 ```
 
 Relative links are resolved against the page (its final URL after redirects); links that are not http(s)
-(`mailto:`, `javascript:`, `tel:`) are skipped; pages already queued are skipped.
+(`mailto:`, `javascript:`, `tel:`) are skipped; pages already queued are skipped, also when their links differ only by
+tracking parameters or by the order of the query (see [Crawl scope](#crawl-scope)).
 
 ## Labels and page data
 
@@ -251,8 +254,9 @@ Assert.AreEqual(24, page.Found.Count);
 - One attempt with the loader of the label and `RequestTimeout`; no retries, robots.txt, throttle, cache, snapshots, state
   or `Stats`, so it may go while a run goes. A network error throws, and no response in time throws `TimeoutException`.
 - The page is checked with the rules of its label, and the handler runs only when it passes, as in a run.
-- `Found` takes what a run would take: duplicates and URLs that are not http(s) are left out, and `ctx.Enqueue` returns
-  false for them as in a run. `MaxDepth` and `MaxRequests` do not apply.
+- `Found` takes what a run would take: duplicates, URLs that are not http(s) and links out of the crawl scope are left
+  out, and `ctx.Enqueue` returns false for them as in a run; the URLs are without `IgnoredQueryParameters`. `MaxDepth`
+  and `MaxRequests` do not apply.
 - Items emitted before the handler threw stay in `Items`, and `Exception` holds what it threw. `Succeeded` is true when
   the page passed the checks and the handler finished.
 - A typed handler needs its data: `ParseAsync(ScrapeRequest.For(url, PageType.Item, teaser))`.
@@ -415,6 +419,45 @@ crawled without rules.
 and those of `RequestsNeeded`: the pages the handlers queue are skipped. To see them without loading them, use
 `ParseAsync`.
 
+## Crawl scope
+
+```csharp
+var options = new ScraperOptions
+{
+    AllowedHosts = { "shop.example" },                             // and its subdomains: www.shop.example, m.shop.example
+    UrlFilter = url => !url.AbsolutePath.StartsWith("/blog/"),     // and what of them to skip
+};
+```
+
+`AllowedHosts` keeps the crawl on the sites you name: a link that a handler queues to another host is skipped, and so is
+one that `UrlFilter` turns down. The filter gets the absolute URL and runs in the handlers, on several threads at once.
+Only the links found on pages are checked: start requests and those of `RequestsNeeded` are taken as given. A skipped
+link is not loaded, nor is the robots.txt of its host; it takes nothing of `MaxRequests` and is counted in
+`Stats.OutOfScope`. The first one is logged with the page it was found on, so a site that redirects to another domain,
+where every link points outside, shows at once. A run continued from its state file drops the saved links that the scope
+does not take any more.
+
+The `filter` of `Enqueue` picks the links of one call, so one list of links can go to several labels:
+
+```csharp
+var links = ctx.Html.XPathValues("//a/@href");
+ctx.Enqueue(links, PageType.Item, filter: url => url.AbsolutePath.StartsWith("/p/"));
+ctx.Enqueue(links, PageType.Listing, filter: url => url.AbsolutePath.StartsWith("/c/"));
+```
+
+Links that differ only by tracking parameters are one page: `IgnoredQueryParameters` are dropped from the URL of every
+request, so the page is loaded once, and `ctx.Request.Url` and your items get the clean URL. By default they are `utm_*`
+and the click ids of ads, mail and analytics (`gclid`, `fbclid`, `msclkid`, `yclid`, `ysclid`, `srsltid`, `_ga`,
+`mc_cid`...). Add those of sessions, or clear the list to load URLs as they are:
+
+```csharp
+options.IgnoredQueryParameters.Add("sessionid");
+options.IgnoredQueryParameters.Clear();
+```
+
+The order of query parameters makes no other page either: `?b=2&a=1` is a duplicate of `?a=1&b=2`, though each is
+loaded as it was found. Parameters of one name keep their order, since `?id=2&id=1` may be a list.
+
 ## Resuming a run
 
 ```csharp
@@ -452,6 +495,9 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
 | `RequestsNeededBelow` | 1000 | with `RequestsNeeded` handlers: ask for more requests when fewer are unfinished |
 | `MaxDepth` | none | deepest link to follow; start requests are depth 0, so 0 loads only them |
+| `AllowedHosts` | any host | hosts, with their subdomains, whose links are followed |
+| `UrlFilter` | none | which links found on pages are followed |
+| `IgnoredQueryParameters` | `utm_*`, `gclid`, `fbclid`, `yclid`... | dropped from URLs: links that differ only by them are one page |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
@@ -483,7 +529,7 @@ scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.
 ```
 
 `scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, from cache, retries, blocked,
-items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
+items, duplicates, out of scope, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
 
 `Stats.Reasons` tells why attempts gave no page, so a site that blocks or a selector that broke shows at once. Every retry
 and every failure is counted once, in a group of its kind, reason, label and host, most frequent first. The reason is the
