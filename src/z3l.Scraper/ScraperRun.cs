@@ -50,7 +50,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     private readonly ConcurrentQueue<FailedRequest> _failed = new();
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _pending;
-    private int _requestLimitLogged, _depthLimitLogged;
+    private int _requestLimitLogged, _depthLimitLogged, _scopeLogged;
+    private readonly CrawlScope _scope;
 
     private readonly object _rateLock = new();
     private readonly long _rateInterval;     // Stopwatch ticks between load starts, 0 for no limit
@@ -98,7 +99,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         {
             _rateInterval = Stopwatch.Frequency * 60 / perMinute;
         }
-        _throttle = new HostThrottle(_options.MaxThrottleDelay, Push, scraper.Logger, _stop.Token);
+        _scope = new CrawlScope(_options);
+        _throttle = new HostThrottle(_options, Stats, Push, scraper.Logger, _stop.Token);
         if (_options.RespectRobotsTxt)
         {
             _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
@@ -202,11 +204,11 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
 
     /// <summary>
     /// Accepts a new request: start requests come without a parent, a handler's requests with the request it handles.
-    /// False for a duplicate, a request over the limits, or a bad URL from a handler; a bad start URL throws.
+    /// False for a duplicate, a request over the limits, or a bad URL or one out of the crawl scope from a handler; a bad start URL throws.
     /// </summary>
     public bool Enqueue(ScrapeRequest request, ScrapeRequest? parent)
     {
-        if (!UrlHelper.TryNormalize(request.Url, out var url))
+        if (!UrlHelper.TryNormalizeUri(request.Url, out var uri))
         {
             if (parent != null) return false;
             throw new ArgumentException($"A start request needs an absolute http(s) URL: \"{request.Url}\"", nameof(request));
@@ -214,9 +216,22 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         _scraper.RouteOf(request);       // where the mistake is, not later in the handler
         _codec?.Check(request.Label, request.Data);
 
+        uri = _scope.Clean(uri);
+        // the scope is for the links found on pages: start requests and those of RequestsNeeded are taken as given.
+        // A link out of it is not marked as seen: nothing to remember, and the hash is not even made
+        if (parent != null && !_scope.Allows(uri))
+        {
+            Stats.AddOutOfScope();
+            if (Interlocked.Exchange(ref _scopeLogged, 1) == 0)
+            {
+                Logger.LogInformation("Links out of the crawl scope (AllowedHosts, UrlFilter) are skipped, the first: {Url} on {Page}", uri.AbsoluteUri, parent.Url);
+            }
+            return false;
+        }
+
         var depth = parent == null ? 0 : parent.Depth + 1;
         // own copy: the caller may reuse its instance
-        request = request with { Url = url, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
+        request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
         // hashed before the lock: the SHA-256 of a long POST body takes a while
         KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey());
 
@@ -525,7 +540,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         }
         var fromCache = cached != null;
 
-        // a throttled host: the request waits in the host's line and comes back through the queue when its slot comes
+        // a host spaced or at its limit: the request waits in the host's line and comes back through the queue when its slot comes.
+        // A load let go here gives its slot back as soon as the loader answers (Exit)
         if (!fromCache && !_throttle.Enter(host, request)) return;
 
         if (!fromCache) await WaitForRateSlotAsync(token).ConfigureAwait(false);
@@ -562,8 +578,15 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 if (_options.RequestTimeout != Timeout.InfiniteTimeSpan && !queued) timeout.CancelAfter(_options.RequestTimeout);
                 try
                 {
-                    response = await loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
-                               ?? throw new InvalidOperationException($"{loader.GetType().Name}.LoadAsync returned null");
+                    try
+                    {
+                        response = await loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
+                                   ?? throw new InvalidOperationException($"{loader.GetType().Name}.LoadAsync returned null");
+                    }
+                    finally
+                    {
+                        _throttle.Exit(host);       // the host's slot: the handler does not hold it
+                    }
                     verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
                 }
                 catch (NonRetryableException ex) when (!token.IsCancellationRequested)
@@ -1114,9 +1137,10 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         }
         _seenStored = run.Stored;
 
+        var outOfScope = 0;
         foreach (var saved in run.Pending)
         {
-            if (!UrlHelper.TryNormalize(saved.Url, out var url))
+            if (!UrlHelper.TryNormalizeUri(saved.Url, out var uri))
             {
                 Logger.LogWarning("Skipped a request with a bad URL in the state file: {Url}", saved.Url);
                 continue;
@@ -1125,9 +1149,16 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             {
                 throw new InvalidOperationException($"The state file {path} has requests with label \"{saved.Label}\", and there is no handler for it");
             }
+            // found on a page: a scope narrowed since the earlier run drops it, and the next save leaves it out
+            if (saved.Depth > 0 && !_scope.Allows(_scope.Clean(uri)))
+            {
+                Stats.AddOutOfScope();
+                outOfScope++;
+                continue;
+            }
 
             // taken over as accepted: no duplicate check (its key is in the seen list) and no limits (an earlier run accepted it)
-            var request = saved with { Url = url };
+            var request = saved with { Url = uri.AbsoluteUri };
             lock (_seen)
             {
                 _accepted++;
@@ -1139,6 +1170,10 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             Push(request);
         }
 
+        if (outOfScope > 0)
+        {
+            Logger.LogInformation("{Count} requests of the state file {Path} are out of the crawl scope now (AllowedHosts, UrlFilter): they are dropped", outOfScope, path);
+        }
         Logger.LogInformation("Continuing the run saved in {Path}: {Pending} requests to finish, {Seen} pages seen", path, Stats.Restored, _seen.Count);
     }
 

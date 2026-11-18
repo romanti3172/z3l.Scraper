@@ -88,7 +88,8 @@ public sealed class ScrapeContext
 
     /// <summary>
     /// Queues a page that needs only its link (a listing, a category). A relative URL resolves against the current page.
-    /// Returns false for a duplicate, for a URL that is not http(s) (mailto:, javascript:...) and over the limits.
+    /// Returns false for a duplicate, for a URL that is not http(s) (mailto:, javascript:...), over the limits and out of the crawl scope
+    /// (<see cref="ScraperOptions.AllowedHosts"/>, <see cref="ScraperOptions.UrlFilter"/>).
     /// </summary>
     /// <param name="url">Absolute or relative URL; null and empty are ignored.</param>
     /// <param name="label">Handler label: a <see cref="PageType"/> or a string; the default label when omitted.</param>
@@ -114,14 +115,33 @@ public sealed class ScrapeContext
         return Enqueue(new ScrapeRequest(url, label) { Data = data, Priority = priority });
     }
 
-    /// <summary>Queues pages with one label. Returns how many were new.</summary>
-    public int Enqueue(IEnumerable<string?> urls, ScrapeLabel label = default, ScrapePriority priority = ScrapePriority.Normal)
+    /// <summary>
+    /// Queues pages with one label; returns how many were new. With <paramref name="filter"/> only the links it takes are queued: it gets
+    /// each link resolved against the current page, so one list of links can go to several labels, for example
+    /// <c>ctx.Enqueue(links, PageType.Item, filter: url =&gt; url.AbsolutePath.StartsWith("/p/"))</c>.
+    /// </summary>
+    /// <param name="urls">Absolute or relative URLs; null and empty ones are ignored.</param>
+    /// <param name="label">Handler label: a <see cref="PageType"/> or a string; the default label when omitted.</param>
+    /// <param name="priority">Queue priority.</param>
+    /// <param name="filter">
+    /// Which of the links to queue; null queues all of them. The crawl scope of the run (<see cref="ScraperOptions.AllowedHosts"/>,
+    /// <see cref="ScraperOptions.UrlFilter"/>) is asked as well.
+    /// </param>
+    public int Enqueue(IEnumerable<string?> urls, ScrapeLabel label = default, ScrapePriority priority = ScrapePriority.Normal, Func<Uri, bool>? filter = null)
     {
         ArgumentNullException.ThrowIfNull(urls);
         var added = 0;
         foreach (var url in urls)
         {
-            if (Enqueue(url, label, priority)) added++;
+            if (filter == null)
+            {
+                if (Enqueue(url, label, priority)) added++;
+            }
+            else if (UrlHelper.TryResolveUri(Response.Url, url, out var absolute) && filter(absolute)
+                     && Enqueue(new ScrapeRequest(absolute.AbsoluteUri, label) { Priority = priority }))
+            {
+                added++;
+            }
         }
         return added;
     }
