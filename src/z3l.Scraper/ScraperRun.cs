@@ -6,6 +6,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using z3l.Scraper.Crawling;
+using z3l.Scraper.Diagnostics;
 using z3l.Scraper.Loading;
 using z3l.Scraper.Validation;
 
@@ -85,6 +86,10 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     private bool _sourceOver;                           // no more calls: a call with nothing left added nothing, or MaxRequests was reached
     private ExceptionDispatchInfo? _requestsNeededError;
 
+    // PublishMetrics and PublishTraces: null when off, and every place that counts or traces is a null check
+    private readonly RunMetrics? _metrics;
+    private readonly RunTraces? _traces;
+
     public ScraperRun(Scraper scraper, CancellationToken cancellationToken)
     {
         _scraper = scraper;
@@ -123,6 +128,14 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 SingleReader = true,
             });
         }
+
+        if (_options.PublishMetrics)
+        {
+            _metrics = new RunMetrics(ScraperTelemetry.Instruments, Stats, _options.Name);
+            // the loaders that count something of their own (proxies, remote loads, credits) publish it too
+            foreach (var loader in scraper.Loaders.OfType<IPublishesMetrics>()) loader.PublishMetrics();
+        }
+        if (_options.PublishTraces) _traces = new RunTraces(ScraperTelemetry.Source, _options.Name);
     }
 
     public ScraperStats Stats { get; } = new();
@@ -134,6 +147,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     public void Start(IEnumerable<ScrapeRequest> startRequests)
     {
         Stats.Start();
+        _metrics?.Start();
         if (_statePath != null && File.Exists(_statePath)) RestoreState(_statePath);
 
         foreach (var request in startRequests)
@@ -186,6 +200,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         finally
         {
             Stats.Stop();
+            _metrics?.Stop();
             if (_statePath != null) await FinishStateAsync().ConfigureAwait(false);
             var reasons = Stats.Reasons;
             if (reasons.Count == 0) Logger.LogInformation("Scraping finished: {Stats}", Stats);
@@ -222,6 +237,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         if (parent != null && !_scope.Allows(uri))
         {
             Stats.AddOutOfScope();
+            _metrics?.Skipped(request.Label, SkipReason.OutOfScope);
             if (Interlocked.Exchange(ref _scopeLogged, 1) == 0)
             {
                 Logger.LogInformation("Links out of the crawl scope (AllowedHosts, UrlFilter) are skipped, the first: {Url} on {Page}", uri.AbsoluteUri, parent.Url);
@@ -241,18 +257,21 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             if (key.HasValue && _seen.Contains(key.Value))
             {
                 Stats.AddDuplicate();
+                _metrics?.Skipped(request.Label, SkipReason.Duplicate);
                 return false;
             }
             // a request over the limits is not marked as seen: found again at a smaller depth it is taken
             if (_options.MaxDepth is { } maxDepth && depth > maxDepth)
             {
                 Stats.AddSkippedByLimit();
+                _metrics?.Skipped(request.Label, SkipReason.Limit);
                 if (Interlocked.Exchange(ref _depthLimitLogged, 1) == 0) Logger.LogInformation("MaxDepth {MaxDepth}: deeper links are skipped", maxDepth);
                 return false;
             }
             if (_options.MaxRequests is { } max && _accepted >= max)
             {
                 Stats.AddSkippedByLimit();
+                _metrics?.Skipped(request.Label, SkipReason.Limit);
                 if (Interlocked.Exchange(ref _requestLimitLogged, 1) == 0) Logger.LogInformation("MaxRequests {MaxRequests} reached: new requests are skipped", max);
                 return false;
             }
@@ -268,6 +287,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         }
 
         Stats.AddEnqueued();
+        _metrics?.Enqueued(request.Label);
         Push(request);
         return true;
     }
@@ -336,6 +356,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         if (UrlHelper.TryNormalize(request.Url, out _)) return Enqueue(request, parent: null);
 
         Stats.AddEnqueued();        // accepted and failed at once, so Pending stays right
+        _metrics?.Enqueued(request.Label);
         Note(new Trouble(ReasonKind.BadUrl, "not an absolute http(s) URL", request.Url), request, failed: true);
         RecordFailure(new FailedRequest(request, FailureReason.BadUrl, $"not an absolute http(s) URL: \"{request.Url}\"", null, null));
         return false;
@@ -550,8 +571,16 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         var loader = _scraper.LoaderFor(request.Label);
         var queued = loader is IQueuePageLoader;
         request.Attempts++;
-        if (fromCache) Stats.AddFromCache();
-        else Stats.AddLoad();
+        if (fromCache)
+        {
+            Stats.AddFromCache();
+            _metrics?.CacheHit(request.Label);
+        }
+        else
+        {
+            Stats.AddLoad();
+        }
+        using var attempt = _traces?.StartAttempt(request, uri, fromCache);
 
         PageResponse? response = cached;
         var inHandlerSlot = false;
@@ -564,6 +593,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             if (fromCache)
             {
                 verdict = ResponseValidator.Validate(request, response!, GetRules(request.Label));
+                RunTraces.Loaded(attempt, ResultOf(verdict), response!.StatusCode, verdict.Reason);
                 if (verdict.Outcome != ValidationOutcome.Ok)
                 {
                     // the kept page is not the page any more (the rules changed since it was kept): it was no attempt
@@ -577,6 +607,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
                 // a queue loader's load may wait in its queue for any time; the loader finds lost loads itself
                 if (_options.RequestTimeout != Timeout.InfiniteTimeSpan && !queued) timeout.CancelAfter(_options.RequestTimeout);
+                var loadStarted = _metrics != null ? Stopwatch.GetTimestamp() : 0;
+                var loadTime = TimeSpan.Zero;
                 try
                 {
                     try
@@ -587,11 +619,13 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     finally
                     {
                         _throttle.Exit(host);       // the host's slot: the handler does not hold it
+                        if (_metrics != null) loadTime = Stopwatch.GetElapsedTime(loadStarted);
                     }
                     verdict = ResponseValidator.Validate(request, response, GetRules(request.Label));
                 }
                 catch (NonRetryableException ex) when (!token.IsCancellationRequested)
                 {
+                    Loaded(request, host, LoadResult.NonRetryable, loadTime, attempt, response?.StatusCode, ex.Message);
                     Note(new Trouble(ReasonKind.NonRetryable, Short(ex.Message), ex.Message), request, failed: true);
                     Fail(request, FailureReason.NonRetryable, ex.Message, response?.StatusCode, ex);
                     return;
@@ -599,6 +633,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 catch (RemoteLoadException ex) when (ex.RateLimited && !token.IsCancellationRequested)
                 {
                     // no page for a handler: the retry is scheduled at once, without a handler slot
+                    Loaded(request, host, LoadResult.RateLimited, loadTime, attempt, null, ex.Message);
                     RetryRateLimited(request, ex);
                     return;
                 }
@@ -612,6 +647,12 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                         ? ValidationResult.Retry($"timeout after {_options.RequestTimeout.TotalSeconds:0.###} s")
                         : ValidationResult.Retry($"load error: {ex.Message}");
                 }
+                Loaded(request, host, loadTrouble?.Kind switch
+                {
+                    ReasonKind.Timeout => LoadResult.Timeout,
+                    ReasonKind.LoadError => LoadResult.LoadError,
+                    _ => ResultOf(verdict),
+                }, loadTime, attempt, response?.StatusCode, verdict.Reason);
             }
 
             if (queued)
@@ -636,14 +677,14 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             switch (verdict.Outcome)
             {
                 case ValidationOutcome.Ok:
-                    var (handled, items) = await HandleAsync(loader, request, response!, host, fromCache, token).ConfigureAwait(false);
+                    var (handled, items) = await HandleAsync(loader, request, response!, host, fromCache, attempt, token).ConfigureAwait(false);
                     // a page its handler took is kept while it is still here (a page from the cache is kept already)
                     if (handled && !fromCache) await StoreInCacheAsync(request, response!, token).ConfigureAwait(false);
                     // the handler is done with the page (its parser is disposed): the text goes back to the pool,
                     // and the page must not wait in memory for a slow consumer
                     response!.ReleaseText();
                     response = null;
-                    if (handled) await DeliverAsync(request, items, token).ConfigureAwait(false);
+                    if (handled) await DeliverAsync(request, host, items, token).ConfigureAwait(false);
                     break;
 
                 case ValidationOutcome.NotFound:
@@ -687,13 +728,14 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
 
     /// <summary>Runs the handler. Handled: its items; not handled: the request is already retried or failed.</summary>
     private async Task<(bool Handled, List<object>? Items)> HandleAsync(IPageLoader loader, ScrapeRequest request, PageResponse response, string host,
-        bool fromCache, CancellationToken token)
+        bool fromCache, Activity? attempt, CancellationToken token)
     {
         var handler = _scraper.FindRoute(request.Label)!.Handler;
         var context = new ScrapeContext(this, request, response, token);
         try
         {
-            await handler(context).ConfigureAwait(false);
+            if (_metrics == null && _traces == null) await handler(context).ConfigureAwait(false);
+            else await RunHandlerObservedAsync(handler, context, request.Label, attempt, token).ConfigureAwait(false);
             if (!fromCache) ReportGoodResponse(loader, request, response);     // the loader hears about its own pages only
             NoteHandlerSuccess(request.Label, host);
             return (true, context.Complete());
@@ -753,8 +795,49 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         }
     }
 
+    /// <summary>Runs a handler timed for the metrics and inside its span; what it throws goes on to <see cref="HandleAsync"/>.</summary>
+    private async Task RunHandlerObservedAsync(Func<ScrapeContext, Task> handler, ScrapeContext context, string label, Activity? attempt,
+        CancellationToken token)
+    {
+        var started = Stopwatch.GetTimestamp();
+        using var span = _traces?.StartHandler(label);
+        try
+        {
+            await handler(context).ConfigureAwait(false);
+            _metrics?.Handler(label, HandlerResult.Ok, Stopwatch.GetElapsedTime(started));
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            var result = ex switch
+            {
+                RetryRequestException { Blocked: true } => HandlerResult.Blocked,
+                RetryRequestException => HandlerResult.Retry,
+                NonRetryableException => HandlerResult.NonRetryable,
+                _ => HandlerResult.Error,
+            };
+            _metrics?.Handler(label, result, Stopwatch.GetElapsedTime(started));
+            RunTraces.HandlerFailed(span, attempt, result, ex);
+            throw;
+        }
+    }
+
+    /// <summary>What a load brought, for the metrics and the span of its attempt.</summary>
+    private void Loaded(ScrapeRequest request, string host, LoadResult result, TimeSpan time, Activity? attempt, int? statusCode, string? reason)
+    {
+        _metrics?.Load(request.Label, host, result, time);
+        RunTraces.Loaded(attempt, result, statusCode, reason);
+    }
+
+    private static LoadResult ResultOf(ValidationResult verdict) => verdict.Outcome switch
+    {
+        ValidationOutcome.Ok => LoadResult.Ok,
+        ValidationOutcome.Blocked => LoadResult.Blocked,
+        ValidationOutcome.NotFound => LoadResult.NotFound,
+        _ => LoadResult.BadPage,
+    };
+
     /// <summary>Hands the items of a handled page to the consumer and finishes the request.</summary>
-    private async Task DeliverAsync(ScrapeRequest request, List<object>? items, CancellationToken token)
+    private async Task DeliverAsync(ScrapeRequest request, string host, List<object>? items, CancellationToken token)
     {
         if (items is not { Count: > 0 })
         {
@@ -773,6 +856,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         }
 
         Stats.AddSucceeded();
+        _metrics?.Succeeded(request.Label, host, items?.Count ?? 0);
         Finish();
     }
 
@@ -1003,6 +1087,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     {
         Stats.AddFailed();
         if (failed.Reason == FailureReason.NotFound) Stats.AddNotFound();
+        _metrics?.Failed(failed.Request, failed.Reason);
         _failed.Enqueue(failed);
 
         // a missing or disallowed page is usual business; a handler error needs its stack trace
@@ -1029,6 +1114,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     {
         var host = Uri.TryCreate(request.Url, UriKind.Absolute, out var uri) ? uri.Authority : "";
         Stats.AddReason(trouble.Kind, trouble.Reason, request.Label, host, failed, trouble.Example, request.Url);
+        // an attempt that was not the last is retried: every retry is noted once, as Stats.Reasons counts it
+        if (!failed) _metrics?.Retry(request.Label, host, trouble.Kind);
     }
 
     /// <summary>A load that threw: a timeout, or a load error by its kind, not by its message (which names the proxy, the IP...).</summary>
@@ -1190,6 +1277,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             if (saved.Depth > 0 && !_scope.Allows(_scope.Clean(uri)))
             {
                 Stats.AddOutOfScope();
+                _metrics?.Skipped(saved.Label, SkipReason.OutOfScope);
                 outOfScope++;
                 continue;
             }
@@ -1204,6 +1292,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             }
             Stats.AddEnqueued();
             Stats.AddRestored();
+            _metrics?.Enqueued(request.Label);
             Push(request);
         }
 

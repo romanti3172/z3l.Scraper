@@ -532,6 +532,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `MaxConsecutiveHandlerErrors` | none | stop the run when the handler of a label fails this many times in a row on a host |
 | `ItemBufferSize` | 1000 | items waiting for the consumer before workers wait |
 | `ProgressInterval` | 30 s | progress line in the log |
+| `PublishMetrics`, `PublishTraces`, `Name` | off, off, none | [metrics and traces](#metrics-and-traces) through the meter and the activity source `z3l.Scraper` |
 
 ## Results
 
@@ -789,6 +790,63 @@ run names the most frequent reasons of `Stats.Reasons`. The scraper writes nothi
 ```csharp
 var scraper = new Scraper(loader, options, loggerFactory.CreateLogger("scraper"));
 ```
+
+## Metrics and traces
+
+Off by default. `PublishMetrics` publishes the metrics of the run and of its loaders through `System.Diagnostics.Metrics`, the
+meter `z3l.Scraper`; `PublishTraces` publishes a span per attempt through the activity source `z3l.Scraper`. Both are part of
+.NET, so no package is added, and both work with trimming and AOT. While they are off, the scraper makes no meter and no
+activity source, and a page costs what it cost before. When they are on and nothing listens, a page still costs nothing
+measurable.
+
+```csharp
+var options = new ScraperOptions { PublishMetrics = true, PublishTraces = true, Name = "shop" };
+
+// OpenTelemetry takes them to Prometheus, Grafana, the .NET Aspire dashboard...
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics.AddMeter("z3l.Scraper"))
+    .WithTracing(tracing => tracing.AddSource("z3l.Scraper"));
+```
+
+Without any code: `dotnet-counters monitor -n MyScraper --counters z3l.Scraper`.
+
+| Metric | Type | What | Tags |
+|---|---|---|---|
+| `z3l.scraper.requests.enqueued` | counter | requests accepted | label |
+| `z3l.scraper.requests.skipped` | counter | requests not accepted: `duplicate`, `limit`, `out_of_scope` | label, reason |
+| `z3l.scraper.requests.finished` | counter | requests that ended: `succeeded`, or why they failed (`not_found`, `retries_exhausted`...) | label, host, result |
+| `z3l.scraper.loads` | counter | load attempts: `ok`, `blocked`, `bad_page`, `not_found`, `timeout`, `load_error`, `rate_limited`, `non_retryable` | label, host, result |
+| `z3l.scraper.cache.hits` | counter | pages the cache gave instead of the loader | label |
+| `z3l.scraper.retries` | counter | retries, by the kind of trouble (`blocked`, `bad_page`, `timeout`...) | label, host, reason |
+| `z3l.scraper.items` | counter | items handed to the consumer | label |
+| `z3l.scraper.load.duration` | histogram, s | time of a load; for a remote loader, from sending the page to its answer | label, host, result |
+| `z3l.scraper.handler.duration` | histogram, s | time of a handler: `ok`, `retry`, `blocked`, `non_retryable`, `error` | label, result |
+| `z3l.scraper.requests.queued`, `.active`, `.pending` | up-down counters | `Stats.Queued`, `InProgress` and `Pending` of the live runs | |
+| `z3l.scraper.proxies` | up-down counter | proxies: `alive`, `resting` after failures, `resting_for_site` | state |
+| `z3l.scraper.proxy.results` | counter | loads through proxies: `success`, `failure`, `blocked`, `bad_response` | result |
+| `z3l.scraper.remote.sent`, `.results`, `.pending` | counters, up-down counter | loads a remote loader sent; `answered`, `failed`, `lost`, `late`; those that wait | loader, result |
+| `z3l.scraper.service.credits` | counter | credits the calls of a scraping service cost | loader |
+
+- **Tags.**
+  - `z3l.scraper.label`;
+  - `z3l.scraper.host`, with the port when it is not the default one;
+  - `z3l.scraper.result`, `z3l.scraper.reason`, `z3l.scraper.state`;
+  - `z3l.scraper.loader`, the type of the loader;
+  - `z3l.scraper.name`, on every metric of a run with a `Name`.
+- **Hosts.** A run tags its first 1000 hosts by name, and the next ones `other`, so a wide crawl does not make a series per
+  host.
+- **Proxies** are not tagged by address: there may be thousands, and an address may hold a login.
+- **Loaders.** The loaders and proxy lists of a run with `PublishMetrics` publish from then on.
+
+The spans:
+- **`scrape {label}`**, one per attempt:
+  - its tags are `url.full`, `server.address`, `z3l.scraper.attempt`, `z3l.scraper.depth`, `z3l.scraper.result` and
+    `http.response.status_code`;
+  - an attempt that gave no page has the error status and `error.type`;
+  - the spans of the loader's HTTP calls go under it.
+- **`handle {label}`**, the handler, under the attempt's span. What the handler calls, a database or an API, goes under it.
+- **A trace per attempt.** Every attempt is a trace of its own. A run started inside a span links its attempts to that span
+  instead of putting them under it, so a crawl of a million pages is not one trace of a million spans.
 
 ## License
 

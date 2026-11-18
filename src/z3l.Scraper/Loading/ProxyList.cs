@@ -4,6 +4,7 @@ using System.Net;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using z3l.Scraper.Diagnostics;
 
 namespace z3l.Scraper.Loading;
 
@@ -380,6 +381,7 @@ public sealed class ProxyList
             entry.Successes++;
             entry.FailuresInARow = 0;
         }
+        CountResult("success");
     }
 
     /// <summary>
@@ -389,6 +391,7 @@ public sealed class ProxyList
     public void ReportFailure(Entry entry, string reason)
     {
         ArgumentNullException.ThrowIfNull(entry);
+        CountResult("failure");
         lock (_lock)
         {
             entry.Failures++;
@@ -411,6 +414,7 @@ public sealed class ProxyList
             ProxyBlockPolicy.Block1Day => TimeSpan.FromDays(1),
             _ => null,
         };
+        CountResult("blocked");
         lock (_lock)
         {
             entry.Blocks++;
@@ -429,6 +433,7 @@ public sealed class ProxyList
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(site);
+        CountResult("bad_response");
         lock (_lock)
         {
             entry.BadResponses++;
@@ -454,6 +459,25 @@ public sealed class ProxyList
         ArgumentNullException.ThrowIfNull(site);
         lock (_lock) entry.BadResponsesInARow.Remove(site);
     }
+
+    // ---------------------------------------------------------------- metrics
+
+    private LoaderInstruments? _metrics;
+
+    /// <summary>
+    /// A run with <see cref="ScraperOptions.PublishMetrics"/> uses a loader with this list: from now on its reports are counted
+    /// (<c>z3l.scraper.proxy.results</c>) and its proxies are observed by state (<c>z3l.scraper.proxies</c>).
+    /// </summary>
+    internal void PublishMetrics()
+    {
+        if (Volatile.Read(ref _metrics) != null) return;
+        var instruments = ScraperTelemetry.LoaderInstruments;
+        instruments.Add(this);
+        Volatile.Write(ref _metrics, instruments);
+    }
+
+    private void CountResult(string result) =>
+        Volatile.Read(ref _metrics)?.ProxyResults.Add(1, new KeyValuePair<string, object?>(ScraperTelemetry.ResultTag, result));
 
     // ---------------------------------------------------------------- file or URL
 

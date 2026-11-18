@@ -222,6 +222,27 @@ public sealed class ScraperOptions
     /// <summary>How often progress is logged. Null to turn it off.</summary>
     public TimeSpan? ProgressInterval { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Publish the metrics of the run through <c>System.Diagnostics.Metrics</c>, the meter <c>z3l.Scraper</c>: requests, loads, retries,
+    /// items, the time of loads and handlers, the queue; and those of its loaders that have them (proxies, remote loads, the credits of a
+    /// scraping service). OpenTelemetry collects them with <c>AddMeter("z3l.Scraper")</c>, <c>dotnet-counters</c> with
+    /// <c>--counters z3l.Scraper</c>. Off by default: the run then makes no meter and does no work for it.
+    /// </summary>
+    public bool PublishMetrics { get; set; }
+
+    /// <summary>
+    /// Publish a trace span per attempt (<c>scrape {label}</c>) and per handler (<c>handle {label}</c>) through the activity source
+    /// <c>z3l.Scraper</c>; the spans of the loader's HTTP calls and of what the handler calls go under them. OpenTelemetry collects them
+    /// with <c>AddSource("z3l.Scraper")</c>. Off by default: the run then starts no activity.
+    /// </summary>
+    public bool PublishTraces { get; set; }
+
+    /// <summary>
+    /// The name of the scraper in its metrics and traces (the tag <c>z3l.scraper.name</c>), to tell the scrapers of one process apart.
+    /// None by default.
+    /// </summary>
+    public string? Name { get; set; }
+
     /// <summary>Checks of loaded pages by label.</summary>
     public ResponseRulesCollection Rules { get; } = new();
 
@@ -260,6 +281,7 @@ public sealed class ScraperOptions
         if (MaxThrottleDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxThrottleDelay), MaxThrottleDelay, "Must be positive");
         if (StateSaveInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(StateSaveInterval), StateSaveInterval, "Must be positive");
         if (RespectRobotsTxt && string.IsNullOrWhiteSpace(RobotsUserAgent)) throw new ArgumentException("RobotsUserAgent must not be empty", nameof(RobotsUserAgent));
+        if (Name != null && string.IsNullOrWhiteSpace(Name)) throw new ArgumentException("Name must not be empty: null for none", nameof(Name));
         foreach (var host in AllowedHosts) Crawling.CrawlScope.HostName(host);
         foreach (var name in IgnoredQueryParameters) QueryParameterSet.Check(name);
     }

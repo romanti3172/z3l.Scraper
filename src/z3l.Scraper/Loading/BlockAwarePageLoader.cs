@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Runtime.CompilerServices;
+using z3l.Scraper.Diagnostics;
 
 namespace z3l.Scraper.Loading;
 
@@ -11,8 +12,11 @@ namespace z3l.Scraper.Loading;
 /// given, in <see cref="LoadThroughAsync"/>: <see cref="HttpClientPageLoader"/> does it with HttpClient, a loader of your own can do it
 /// with a browser, curl or anything else.
 /// </summary>
-public abstract class BlockAwarePageLoader : IBlockAwarePageLoader
+public abstract class BlockAwarePageLoader : IBlockAwarePageLoader, IPublishesMetrics
 {
+    /// <summary>A run with metrics uses the loader: its proxy list publishes them.</summary>
+    void IPublishesMetrics.PublishMetrics() => Proxies?.PublishMetrics();
+
     private readonly ConcurrentDictionary<string, string> _proxyUserAgents = new();
 
     /// <summary>Which proxy loaded a response, so a block reported for it rests the right proxy.</summary>
