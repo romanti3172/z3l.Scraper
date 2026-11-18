@@ -54,6 +54,12 @@ public sealed class ScraperOptions
     public int? MaxRequestsPerMinute { get; set; }
 
     /// <summary>
+    /// With handlers of <see cref="Scraper.RequestsNeeded"/>: the event is raised when fewer requests than this are unfinished
+    /// (queued, in progress or waiting for a retry, links found on pages included), and when none is left. 0: only when none is left.
+    /// </summary>
+    public int RequestsNeededBelow { get; set; } = 1000;
+
+    /// <summary>
     /// Deepest link to follow: start requests have depth 0, the pages they queue 1, and so on. Deeper requests are skipped
     /// and counted in <see cref="ScraperStats.SkippedByLimit"/>. Null for no limit.
     /// </summary>
@@ -160,6 +166,7 @@ public sealed class ScraperOptions
         }
         if (MaxRequests is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequests), MaxRequests, "Must be 1 or more");
         if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
+        if (RequestsNeededBelow < 0) throw new ArgumentOutOfRangeException(nameof(RequestsNeededBelow), RequestsNeededBelow, "Must be 0 or more");
         if (MaxDepth is < 0) throw new ArgumentOutOfRangeException(nameof(MaxDepth), MaxDepth, "Must be 0 or more");
         if (MaxConsecutiveHandlerErrors is < 1)
         {

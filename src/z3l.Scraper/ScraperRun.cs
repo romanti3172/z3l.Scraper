@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using z3l.Scraper.Crawling;
@@ -74,6 +75,14 @@ internal sealed class ScraperRun : IAsyncDisposable
     private int _waitingForHandler;
     private bool _loaderPaused;
 
+    // Scraper.RequestsNeeded: one loop calls its handlers when the run is low on requests, and it decides when the run is over
+    private readonly Func<RequestsNeededEventArgs, Task>? _requestsNeeded;
+    private readonly int _requestsNeededBelow;
+    private readonly Channel<bool>? _refillWake;        // capacity 1, a write to a full one is dropped: a signal that wakes the loop
+    private bool _sourceDry;                            // a call in the middle of the run added nothing: the next comes when nothing is left
+    private bool _sourceOver;                           // no more calls: a call with nothing left added nothing, or MaxRequests was reached
+    private ExceptionDispatchInfo? _requestsNeededError;
+
     public ScraperRun(Scraper scraper, CancellationToken cancellationToken)
     {
         _scraper = scraper;
@@ -100,6 +109,17 @@ internal sealed class ScraperRun : IAsyncDisposable
         _queueLoaders = [.. scraper.Loaders.OfType<IQueuePageLoader>()];
         _hasLocalLoader = scraper.Loaders.Any(x => x is not IQueuePageLoader);
         if (_queueLoaders.Length > 0) _handlerSlots = new SemaphoreSlim(_options.MaxConcurrency, _options.MaxConcurrency);
+
+        _requestsNeeded = scraper.RequestsNeededHandlers;
+        if (_requestsNeeded != null)
+        {
+            _requestsNeededBelow = _options.RequestsNeededBelow;
+            _refillWake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
+            {
+                FullMode = BoundedChannelFullMode.DropWrite,
+                SingleReader = true,
+            });
+        }
     }
 
     public ScraperStats Stats { get; } = new();
@@ -118,7 +138,7 @@ internal sealed class ScraperRun : IAsyncDisposable
             ArgumentNullException.ThrowIfNull(request, nameof(startRequests));
             Enqueue(request, parent: null);
         }
-        if (Volatile.Read(ref _pending) == 0) _drained.TrySetResult();
+        PendingChanged(Volatile.Read(ref _pending));
 
         Completion = RunAsync();
     }
@@ -135,8 +155,11 @@ internal sealed class ScraperRun : IAsyncDisposable
             var progress = ProgressAsync(token);
             var saver = _statePath != null ? SaveLoopAsync(token) : Task.CompletedTask;
             var timeLimit = Task.Delay(_options.MaxRunDuration ?? Timeout.InfiniteTimeSpan, token);
+            // ends only when a RequestsNeeded handler throws (or the run stops)
+            var refill = _refillWake != null ? Task.Run(() => RefillLoopAsync(token)) : null;
 
-            var finished = await Task.WhenAny(_drained.Task, timeLimit).ConfigureAwait(false);
+            var finished = await (refill == null ? Task.WhenAny(_drained.Task, timeLimit) : Task.WhenAny(_drained.Task, timeLimit, refill))
+                .ConfigureAwait(false);
             if (finished == timeLimit && timeLimit.IsCompletedSuccessfully)
             {
                 Stats.StoppedByTimeLimit = true;
@@ -149,6 +172,8 @@ internal sealed class ScraperRun : IAsyncDisposable
             if (_queueLoaders.Length > 0) SetLoaderPaused(false);
             await IgnoreCancellation(progress).ConfigureAwait(false);
             await IgnoreCancellation(saver).ConfigureAwait(false);
+            if (refill != null) await IgnoreCancellation(refill).ConfigureAwait(false);
+            _requestsNeededError?.Throw();      // a RequestsNeeded handler threw: the run fails with its exception
         }
         catch (Exception ex)
         {
@@ -258,9 +283,21 @@ internal sealed class ScraperRun : IAsyncDisposable
     }
 
     /// <summary>The work on the request is over (handled or failed).</summary>
-    private void Finish()
+    private void Finish() => PendingChanged(Interlocked.Decrement(ref _pending));
+
+    /// <summary>Unfinished requests went down to <paramref name="pending"/>: the run may be over, or low on requests.</summary>
+    private void PendingChanged(int pending)
     {
-        if (Interlocked.Decrement(ref _pending) == 0) _drained.TrySetResult();
+        if (_refillWake == null)
+        {
+            if (pending == 0) _drained.TrySetResult();
+            return;
+        }
+        // with RequestsNeeded handlers the loop that calls them decides when the run is over
+        if (pending == 0 || (pending < _requestsNeededBelow && !Volatile.Read(ref _sourceDry) && !Volatile.Read(ref _sourceOver)))
+        {
+            _refillWake.Writer.TryWrite(true);
+        }
     }
 
     /// <summary>The request no longer needs to be in the state file: it failed, or the consumer took all its items.</summary>
@@ -273,6 +310,101 @@ internal sealed class ScraperRun : IAsyncDisposable
     public void Acknowledge(ScrapeRequest? request)
     {
         if (request != null && Interlocked.Decrement(ref request.UnackedItems) == 0) Forget(request);
+    }
+
+    // ---------------------------------------------------------------- Scraper.RequestsNeeded
+
+    /// <summary>
+    /// A request given by a RequestsNeeded handler, queued as a start request. A URL that is not an absolute http(s) URL fails the
+    /// request instead of throwing: a source of many rows may hold a broken one.
+    /// </summary>
+    internal bool AddRequest(ScrapeRequest request)
+    {
+        if (UrlHelper.TryNormalize(request.Url, out _)) return Enqueue(request, parent: null);
+
+        Stats.AddEnqueued();        // accepted and failed at once, so Pending stays right
+        RecordFailure(new FailedRequest(request, FailureReason.BadUrl, $"not an absolute http(s) URL: \"{request.Url}\"", null, null));
+        return false;
+    }
+
+    /// <summary>
+    /// Calls the RequestsNeeded handlers when the run is low on requests, one call at a time, and ends the run when nothing is left
+    /// and a call gives nothing, or when nothing is left after MaxRequests. An exception of a handler ends the run with it.
+    /// </summary>
+    private async Task RefillLoopAsync(CancellationToken token)
+    {
+        try
+        {
+            var wake = _refillWake!.Reader;
+            while (true)
+            {
+                await wake.ReadAsync(token).ConfigureAwait(false);
+                while (await RefillAsync(token).ConfigureAwait(false)) { }
+            }
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            _requestsNeededError = ExceptionDispatchInfo.Capture(ex);     // RunAsync ends the run with it
+        }
+    }
+
+    /// <summary>One step of the loop: raises the event if the run needs requests. False: nothing to do until the next signal.</summary>
+    private async Task<bool> RefillAsync(CancellationToken token)
+    {
+        var pending = Volatile.Read(ref _pending);
+        var idle = pending == 0;
+
+        if (!_sourceOver && _options.MaxRequests is { } max && Volatile.Read(ref _accepted) >= max)
+        {
+            Volatile.Write(ref _sourceOver, true);
+            Logger.LogDebug("MaxRequests {MaxRequests} reached: RequestsNeeded is not raised any more", max);
+        }
+        if (_sourceOver)
+        {
+            if (idle) _drained.TrySetResult();
+            return false;
+        }
+        if (!idle && (pending >= _requestsNeededBelow || Volatile.Read(ref _sourceDry))) return false;
+
+        var given = await RaiseRequestsNeededAsync(pending, token).ConfigureAwait(false);
+        if (given > 0)
+        {
+            Volatile.Write(ref _sourceDry, false);
+            return true;        // still low on requests? the next call follows at once
+        }
+        if (idle && Volatile.Read(ref _pending) == 0)
+        {
+            Volatile.Write(ref _sourceOver, true);
+            Logger.LogDebug("RequestsNeeded gave nothing and nothing is left: the run ends");
+            _drained.TrySetResult();
+            return false;
+        }
+        Volatile.Write(ref _sourceDry, true);     // nothing for now: the next call comes when nothing is left
+        return Volatile.Read(ref _pending) == 0;
+    }
+
+    /// <summary>Calls the handlers of RequestsNeeded one after another with one arguments object; returns how many requests they gave.</summary>
+    private async Task<int> RaiseRequestsNeededAsync(int pending, CancellationToken token)
+    {
+        var args = new RequestsNeededEventArgs(this, pending, token);
+        int given;
+        try
+        {
+            foreach (var handler in _requestsNeeded!.GetInvocationList())
+            {
+                if (((Func<RequestsNeededEventArgs, Task>)handler)(args) is { } call) await call.ConfigureAwait(false);
+            }
+        }
+        catch (Exception) when (token.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(token);       // the run is stopping: not a failure of the handler
+        }
+        finally
+        {
+            given = args.Complete();
+        }
+        Logger.LogDebug("RequestsNeeded with {Pending} unfinished: {Given} requests given", pending, given);
+        return given;
     }
 
     // ---------------------------------------------------------------- processing
@@ -791,20 +923,24 @@ internal sealed class ScraperRun : IAsyncDisposable
 
     private void Fail(ScrapeRequest request, FailureReason reason, string message, int? status, Exception? error)
     {
-        Stats.AddFailed();
-        if (reason == FailureReason.NotFound) Stats.AddNotFound();
+        RecordFailure(new FailedRequest(request, reason, message, status, error));
+        ForgetFailed(request, reason);
+        Finish();
+    }
 
-        var failed = new FailedRequest(request, reason, message, status, error);
+    /// <summary>Counts, keeps, logs and reports a failed request.</summary>
+    private void RecordFailure(FailedRequest failed)
+    {
+        Stats.AddFailed();
+        if (failed.Reason == FailureReason.NotFound) Stats.AddNotFound();
         _failed.Enqueue(failed);
 
         // a missing or disallowed page is usual business; a handler error needs its stack trace
-        var level = reason is FailureReason.NotFound or FailureReason.DisallowedByRobotsTxt ? LogLevel.Information : LogLevel.Warning;
-        Logger.Log(level, reason == FailureReason.HandlerError ? error : null,
-            "Failed {Url} ({Label}): {Reason}, {Message}", request.Url, request.Label, reason, message);
+        var level = failed.Reason is FailureReason.NotFound or FailureReason.DisallowedByRobotsTxt ? LogLevel.Information : LogLevel.Warning;
+        Logger.Log(level, failed.Reason == FailureReason.HandlerError ? failed.Exception : null,
+            "Failed {Url} ({Label}): {Reason}, {Message}", failed.Request.Url, failed.Request.Label, failed.Reason, failed.Message);
 
         _scraper.RaiseRequestFailed(failed);
-        ForgetFailed(request, reason);
-        Finish();
     }
 
     // ---------------------------------------------------------------- broken handlers

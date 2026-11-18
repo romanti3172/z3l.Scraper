@@ -26,6 +26,8 @@ rotating proxies, rate and time limits, and streaming results while the scraping
   pages in work or not taken yet are done again, nothing is lost.
 - **Streaming with backpressure.** `await foreach` over items; a slow consumer slows the scraper down instead of
   filling the memory.
+- **Requests as they are needed.** A big table of URLs is read a batch at a time when the run is low on requests
+  (`RequestsNeeded`), not loaded into memory at once.
 - **Pluggable loaders.** `HttpPageLoader` is built in; implement `IPageLoader` for a browser or anything else.
 - **Cache and snapshots.** Pages the handlers took are kept and given back, so you work on handlers without loading the
   site each time; pages that were blocked, missing or broken are saved, so you see what the site answered.
@@ -130,6 +132,39 @@ new ScrapeRequest("https://shop.example/api/search", PageType.Api)
 ```
 
 Start requests need absolute http(s) URLs; a bad one throws `ArgumentException` at once.
+
+## Requests as the run needs them
+
+Start requests are queued at once, all of them: fine for thousands of pages, but a table of millions would sit in memory.
+Give such a source out as the run needs it: `RequestsNeeded` is raised when fewer than `RequestsNeededBelow` (1000)
+requests are unfinished, and when none is left.
+
+```csharp
+long lastId = 0;
+scraper.RequestsNeeded += async e =>
+{
+    var rows = await db.ProductsAfterAsync(lastId, take: 1000, e.CancellationToken);   // WHERE id > @lastId ORDER BY id LIMIT 1000
+    foreach (var row in rows) e.Add(new ScrapeRequest(row.Url, PageType.Item));
+    if (rows.Count > 0) lastId = rows[^1].Id;
+};
+
+await foreach (var item in scraper.RunAsync()) { ... }
+```
+
+- Unfinished requests are those queued, in progress or waiting for a retry, links found on pages included: when the pages
+  give many links, the event waits until they are done. `e.Pending` is their number.
+- Calls never overlap, so a handler may keep its place in a plain variable, and the run does not end while a call goes.
+  When a call still leaves fewer requests than the limit, the next one follows at once.
+- A call that adds nothing means the source is empty for now: in the middle of the run the next call comes when nothing is
+  left, and when nothing is left and a call adds nothing, the run ends. Requests passed to `e.Add` count even when they are
+  duplicates, so a handler that gives the same rows again is called again.
+- `e.Add` queues a request as a start request and returns false for a duplicate or over `MaxRequests`. A URL that is not an
+  absolute http(s) URL does not throw: its request fails with `FailureReason.BadUrl`.
+- The event is not raised after `MaxRequests` is reached or when the run stops (`MaxRunDuration`, cancellation, `break`);
+  `e.CancellationToken` cancels a call that goes then. An exception of a handler ends the run with it.
+- Start requests passed to `RunAsync` are taken as before. Several handlers are called one after another with the same `e`.
+- With `StatePath` the unfinished requests are saved as always, but where the source goes on after a restart is up to the
+  handler: keep its place yourself, or mark rows done as their items are saved.
 
 ## Handlers
 
@@ -363,6 +398,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `MaxConcurrency` | 8 | requests loaded and handled at once |
 | `MaxRequestsPerMinute` | none | loads spread evenly, retries included |
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
+| `RequestsNeededBelow` | 1000 | with `RequestsNeeded` handlers: ask for more requests when fewer are unfinished |
 | `MaxDepth` | none | deepest link to follow; start requests are depth 0 |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
@@ -387,7 +423,7 @@ await foreach (var item in scraper.RunAsync(requests, cancellationToken)) { ... 
 var result = await scraper.RunToListAsync(requests);
 result.Items;                 // all items, in the order they came
 result.ItemsOf<Product>();    // the items of one type
-result.Failed;                // FailedRequest: Request, Reason (RetriesExhausted / NotFound / HandlerError / NonRetryable / DisallowedByRobotsTxt), Message, StatusCode, Exception
+result.Failed;                // FailedRequest: Request, Reason (RetriesExhausted / NotFound / HandlerError / NonRetryable / DisallowedByRobotsTxt / BadUrl), Message, StatusCode, Exception
 result.Stats;                 // counters
 
 scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.Request.Url, failed.Message);

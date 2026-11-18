@@ -15,6 +15,11 @@ public enum FailureReason
     NonRetryable,
     /// <summary>robots.txt of the host disallows the page (<see cref="ScraperOptions.RespectRobotsTxt"/>).</summary>
     DisallowedByRobotsTxt,
+    /// <summary>
+    /// The URL of a request given by a <see cref="Scraper.RequestsNeeded"/> handler is not an absolute http(s) URL. Such a request is
+    /// counted as enqueued and failed at once.
+    /// </summary>
+    BadUrl,
 }
 
 /// <summary>A request that ended without a handled page.</summary>
@@ -31,7 +36,10 @@ public sealed class ScraperStats
     private readonly Stopwatch _clock = new();
     private long _enqueued, _duplicates, _skipped, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked, _items, _inProgress, _queued;
 
-    /// <summary>Unique requests accepted.</summary>
+    /// <summary>
+    /// Unique requests accepted. A request with a bad URL from <see cref="Scraper.RequestsNeeded"/> is counted here and in
+    /// <see cref="Failed"/> at once.
+    /// </summary>
     public long Enqueued => Interlocked.Read(ref _enqueued);
     /// <summary>Requests skipped as duplicates.</summary>
     public long Duplicates => Interlocked.Read(ref _duplicates);

@@ -122,6 +122,27 @@ public sealed class Scraper
     /// <summary>Called for every request that fails (after its retries). Called from worker threads.</summary>
     public event Action<FailedRequest>? RequestFailed;
 
+    /// <summary>
+    /// Raised when the run is low on requests: fewer than <see cref="ScraperOptions.RequestsNeededBelow"/> are unfinished (queued, in
+    /// progress or waiting for a retry, links found on pages included), or none is left. Handlers give the run more with
+    /// <see cref="RequestsNeededEventArgs.Add(ScrapeRequest)"/>, for example the next rows of a database, so a big list of pages need
+    /// not sit in memory at once.
+    /// <para>
+    /// Calls never overlap, and the run does not end while one goes; when a call still leaves fewer requests than the limit
+    /// unfinished, the next one follows at once. A call that adds nothing means the source is empty for now: in the middle of the
+    /// run the next call comes when nothing is left, and when nothing is left and a call adds nothing, the run ends. Several
+    /// handlers are called one after another with the same arguments; the handlers subscribed when the run starts are called.
+    /// </para>
+    /// <para>
+    /// Not raised after <see cref="ScraperOptions.MaxRequests"/> is reached or once the run stops; a call that goes then is
+    /// cancelled through <see cref="RequestsNeededEventArgs.CancellationToken"/>. An exception of a handler ends the run with it.
+    /// </para>
+    /// </summary>
+    public event Func<RequestsNeededEventArgs, Task>? RequestsNeeded;
+
+    /// <summary>The handlers of <see cref="RequestsNeeded"/>, taken by a run when it starts.</summary>
+    internal Func<RequestsNeededEventArgs, Task>? RequestsNeededHandlers => RequestsNeeded;
+
     /// <summary>Registers the handler of a label: a <see cref="PageType"/> or a string (labels ignore case). Returns this scraper.</summary>
     public Scraper Route(ScrapeLabel label, Func<ScrapeContext, Task> handler)
     {
