@@ -613,10 +613,16 @@ anti-bot that reads JA3/JA4 tells from a browser's: for such sites use a browser
 ### Loaders of your own
 
 ```
+local loaders (IPageLoader): the scraper's MaxConcurrency and RequestTimeout
 BlockAwarePageLoader            rotating proxies, a user agent per proxy, Report… to ProxyList
  └─ HttpClientPageLoader        HttpClient per proxy with its cookies, CreateHandler, CreateMessage, the body limit
      ├─ HttpPageLoader          the request as it is
      └─ StealthHttpPageLoader   the way a browser asks
+
+remote loaders (IQueuePageLoader): every page at once, the loader keeps its own pace and time
+QueuePageLoader                 the loads that wait for answers, Paused, lost loads, counters
+ ├─ RabbitMqPageLoader          remote workers behind RabbitMQ (z3l.Scraper.RabbitMQ)
+ └─ ServicePageLoader           a scraping service, a call per page: the plan's limit, a call timeout, levels
 ```
 
 ```csharp
@@ -664,6 +670,47 @@ once, and `RequestTimeout` does not apply: the loader finds lost loads itself. W
 loaded pages wait for a handler, the scraper sets the loader's `Paused`, and the answers wait in the queue instead of the
 memory. [z3l.Scraper.RabbitMQ](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.RabbitMQ/README.md)
 is such a loader on RabbitMQ, with the workers for it.
+
+### Remote loaders
+
+`QueuePageLoader` is the waiting part of such a loader: it keeps the loads that wait for their answers, stops the clock of
+their deadlines while the scraper pauses it, and counts what was sent, answered, failed where it went, lost and answered
+late. A derived class sends a load (`SendAsync`) and gives its answer with `Answer`, `Fail` or `Lose`; a lost load throws
+`RemoteLoadException`, and the scraper retries it.
+
+`ServicePageLoader` is the base of a scraping service that loads a page per HTTP call (ScraperAPI, ScrapingBee, Zyte
+API...), where the proxies, the browsers and the captchas are the service's:
+
+```csharp
+public sealed class MyServiceLoader(string apiKey) : ServicePageLoader(new ServicePageLoaderOptions { MaxConcurrency = 10 })
+{
+    protected override int MaxLevel => 1;      // 0: plain, 1: premium proxies
+
+    protected override async Task<PageResponse> CallAsync(HttpClient client, ScrapeRequest request, int level, CancellationToken cancellationToken)
+    {
+        using var answer = await client.GetAsync($"https://api.service.example/?key={apiKey}&url={Uri.EscapeDataString(request.Url)}&premium={level > 0}",
+            cancellationToken);
+        if (answer.StatusCode == HttpStatusCode.Unauthorized) throw new NonRetryableException("wrong API key");
+        if ((int)answer.StatusCode >= 500) throw new RemoteLoadException($"the service failed: {answer.StatusCode}");
+        AddCredits(level > 0 ? 10 : 1);
+        return PageResponse.FromText(200, request.Url, await answer.Content.ReadAsStringAsync(cancellationToken));
+    }
+}
+```
+
+- At most `MaxConcurrency` calls go at once, the plan's limit, whatever the scraper's `MaxConcurrency` is; the other pages
+  wait in the loader, and no time limit counts that wait.
+- No new call starts while the scraper pauses the loader. A call without an answer in `CallTimeout` (3 minutes) is lost.
+- `CallAsync` returns the page as the site gave it, throws `RemoteLoadException` when the service had no page and
+  `NonRetryableException` when another call cannot help. Any other exception of a call, such as a network error to the
+  service, is a `RemoteLoadException`.
+- A page that comes back blocked is loaded again one level up, to `MaxLevel`, and the host goes on from the level that got
+  through. `CallAsync` calls `LevelUp` itself when the service says the site resisted. `Credits` sums what `AddCredits`
+  counted, and `ToString()` shows it with the counters.
+
+Such loaders come one package per service:
+[z3l.Scraper.Loaders.ScrapingBee](https://github.com/romanti3172/z3l.Scraper/blob/main/src/z3l.Scraper.Loaders.ScrapingBee/README.md),
+`new ScrapingBeePageLoader(new() { ApiKey = ..., MaxConcurrency = 10 })`.
 
 Text is decoded the way browsers do it: a byte order mark, the Content-Type charset, then `<meta charset>` or the
 XML declaration, then UTF-8. Labels sites use but .NET does not know (`cp1251`, `win-1251`, `utf8`) are understood,
