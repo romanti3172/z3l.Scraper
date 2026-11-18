@@ -163,7 +163,18 @@ scraper.Route(PageType.Item, ctx =>
 ```
 
 Any other exception fails the request with `FailureReason.HandlerError` (set `Options.RetryOnHandlerError` to retry it).
-Items emitted by a handler that throws are dropped.
+Items emitted by a handler that throws are dropped; the requests it queued before it threw stay queued.
+
+When the site changes its pages, a handler breaks: every page of its label fails, and loading the rest only wastes
+traffic. `MaxConsecutiveHandlerErrors` stops the run after that many handler errors in a row of one label on one host;
+a page the handler takes starts the count again, so odd pages here and there do not stop it. `RetryRequestException` and
+`NonRetryableException` are not handler errors. The run ends as after `MaxRunDuration`, with
+`Stats.StoppedByHandlerErrors`; with `StatePath` the pages the handler failed in a row stay with the unfinished ones, so
+the run continued after the fix does them again.
+
+```csharp
+options.MaxConsecutiveHandlerErrors = 20;
+```
 
 A page lives only while its handler runs: then the parser is disposed and the page is let go, even if the consumer is
 slow to take the items. Items and request data carry values taken from the page (`Text()`, `AttributeHref()`,
@@ -359,6 +370,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
 | `StatePath`, `StateSaveInterval`, `StateJson` | none, 30 s, none | save the run and continue it after a crash |
 | `RetryOnHandlerError` | false | retry when a handler throws |
+| `MaxConsecutiveHandlerErrors` | none | stop the run when the handler of a label fails this many times in a row on a host |
 | `ItemBufferSize` | 1000 | items waiting for the consumer before workers wait |
 | `ProgressInterval` | 30 s | progress line in the log |
 

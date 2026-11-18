@@ -520,6 +520,7 @@ internal sealed class ScraperRun : IAsyncDisposable
         {
             await handler(context).ConfigureAwait(false);
             if (!fromCache) ReportGoodResponse(loader, request, response);     // the loader hears about its own pages only
+            NoteHandlerSuccess(request.Label, host);
             return (true, context.Complete());
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
@@ -553,6 +554,7 @@ internal sealed class ScraperRun : IAsyncDisposable
                     break;
                 default:
                     await SnapshotAsync(request, response, SnapshotKind.HandlerError, ex.Message, ex, fromCache, token).ConfigureAwait(false);
+                    NoteHandlerError(request, host, ex);
                     if (_options.RetryOnHandlerError)
                     {
                         Logger.LogDebug(ex, "Handler \"{Label}\" failed on {Url}", request.Label, request.Url);
@@ -792,8 +794,91 @@ internal sealed class ScraperRun : IAsyncDisposable
             "Failed {Url} ({Label}): {Reason}, {Message}", request.Url, request.Label, reason, message);
 
         _scraper.RaiseRequestFailed(failed);
-        Forget(request);
+        ForgetFailed(request, reason);
         Finish();
+    }
+
+    // ---------------------------------------------------------------- broken handlers
+
+    /// <summary>
+    /// Handler errors in a row of one label on one host (<see cref="ScraperOptions.MaxConsecutiveHandlerErrors"/>), and the requests they
+    /// failed: when the handler turns out broken, those go back to the unfinished ones, so the run continued after the fix does them again.
+    /// </summary>
+    private sealed class HandlerErrors
+    {
+        public int InARow;
+        public bool Broken;
+        public readonly List<ScrapeRequest> Failed = [];
+    }
+
+    // guarded by lock (_handlerErrors); a label and a host have an entry only while their handler errors go on
+    private readonly Dictionary<string, HandlerErrors> _handlerErrors = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Label and host in one key: a host has no '@', so the last one splits them.</summary>
+    private static string HandlerKey(string label, string host) => $"{label}@{host}";
+
+    /// <summary>The handler of the label took a page of the host: its errors in a row start again.</summary>
+    private void NoteHandlerSuccess(string label, string host)
+    {
+        if (_options.MaxConsecutiveHandlerErrors == null) return;
+        lock (_handlerErrors)
+        {
+            var key = HandlerKey(label, host);
+            if (_handlerErrors.TryGetValue(key, out var errors) && !errors.Broken) _handlerErrors.Remove(key);
+        }
+    }
+
+    /// <summary>
+    /// The handler threw an exception of its own. After <see cref="ScraperOptions.MaxConsecutiveHandlerErrors"/> of them in a row of its label on
+    /// the host the handler is broken: the run stops at once, before more pages are loaded only to fail.
+    /// </summary>
+    private void NoteHandlerError(ScrapeRequest request, string host, Exception error)
+    {
+        if (_options.MaxConsecutiveHandlerErrors is not { } max) return;
+        int count;
+        lock (_handlerErrors)
+        {
+            var key = HandlerKey(request.Label, host);
+            if (!_handlerErrors.TryGetValue(key, out var errors)) _handlerErrors[key] = errors = new HandlerErrors();
+            count = ++errors.InARow;
+            if (errors.Broken || count < max) return;
+
+            errors.Broken = true;
+            // the requests it failed so far left the state when they failed: they go back, the next run does them again
+            if (_statePath != null)
+            {
+                foreach (var failed in errors.Failed) _unsaved.TryAdd(failed, 0);
+            }
+            errors.Failed.Clear();
+        }
+
+        Stats.StoppedByHandlerErrors = true;
+        Logger.LogError(error, "The handler of \"{Label}\" failed {Count} times in a row on {Host}, the last time on {Url}: the run stops (MaxConsecutiveHandlerErrors)",
+            request.Label, count, host, request.Url);
+        _ = _stop.CancelAsync();      // the workers stop taking requests now; the run ends as after MaxRunDuration
+    }
+
+    /// <summary>
+    /// A failed request leaves the state file, unless its handler is broken: then the next run does it again. A request failed by a handler
+    /// that may still turn out broken is remembered until the handler takes a page.
+    /// </summary>
+    private void ForgetFailed(ScrapeRequest request, FailureReason reason)
+    {
+        if (reason == FailureReason.HandlerError && _options.MaxConsecutiveHandlerErrors != null && _statePath != null
+            && Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
+        {
+            lock (_handlerErrors)
+            {
+                if (_handlerErrors.TryGetValue(HandlerKey(request.Label, uri.Authority), out var errors))
+                {
+                    if (errors.Broken) return;
+                    errors.Failed.Add(request);
+                }
+                Forget(request);      // under the lock: a handler found broken meanwhile puts it back
+                return;
+            }
+        }
+        Forget(request);
     }
 
     private EffectiveRules GetRules(string label) => _rules.GetOrAdd(label, _options.Rules.Build);

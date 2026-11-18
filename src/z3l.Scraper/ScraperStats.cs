@@ -68,6 +68,11 @@ public sealed class ScraperStats
     public TimeSpan Elapsed => _clock.Elapsed;
     /// <summary>The run stopped because <see cref="ScraperOptions.MaxRunDuration"/> passed.</summary>
     public bool StoppedByTimeLimit { get; internal set; }
+    /// <summary>
+    /// The run stopped because the handler of a label failed <see cref="ScraperOptions.MaxConsecutiveHandlerErrors"/> times in a row on a
+    /// host: the log says which one.
+    /// </summary>
+    public bool StoppedByHandlerErrors { get; internal set; }
 
     internal void Start() => _clock.Start();
     internal void Stop() => _clock.Stop();
