@@ -91,9 +91,10 @@ public sealed class ScraperOptions
     public string RobotsUserAgent { get; set; } = "z3l-scraper";
 
     /// <summary>
-    /// File that keeps the run state: the requests not finished yet and the keys of the pages already seen. It is written every
-    /// <see cref="StateSaveInterval"/> and when the run stops; a run started with an existing file continues where the last one
-    /// stopped; the file is deleted when a run has finished all its pages and the consumer has taken all the items.
+    /// File that keeps the run state: the requests not finished yet. Next to it, <c>{StatePath}.seen</c> keeps the pages already seen,
+    /// a 16-byte hash of each key (<see cref="ScrapeRequest.UniqueKey"/>), and every save only appends the new ones. They are written
+    /// every <see cref="StateSaveInterval"/> and when the run stops; a run started with an existing file continues where the last one
+    /// stopped; both files are deleted when a run has finished all its pages and the consumer has taken all the items.
     /// <para>
     /// A page leaves the file only when its items are taken: an item counts as taken when the <c>await foreach</c> loop asks for
     /// the next one, so save each item in the loop body. Pages in work or not taken when the process died are done again, so
@@ -119,6 +120,19 @@ public sealed class ScraperOptions
     /// <see cref="RetryRequestException"/> is always retried and <see cref="NonRetryableException"/> never is.
     /// </summary>
     public bool RetryOnHandlerError { get; set; }
+
+    /// <summary>
+    /// Handler errors in a row of one label on one host after which the run stops: the handler is broken (the site changed its pages, a
+    /// selector finds nothing), and every next page of the label would be loaded only to fail. A handler error is any exception of the
+    /// handler but <see cref="RetryRequestException"/> and <see cref="NonRetryableException"/>, each attempt counted
+    /// (<see cref="RetryOnHandlerError"/>); a page the handler takes starts the count again, so odd pages here and there do not stop the run.
+    /// <para>
+    /// The run stops as after <see cref="MaxRunDuration"/>, with <see cref="ScraperStats.StoppedByHandlerErrors"/>. With
+    /// <see cref="StatePath"/> the requests the handler failed in a row stay with the unfinished ones, so the run continued after the fix does
+    /// them again. Null, the default, for no limit.
+    /// </para>
+    /// </summary>
+    public int? MaxConsecutiveHandlerErrors { get; set; }
 
     /// <summary>
     /// Items the consumer has not taken yet; when the buffer is full, workers wait before handing over more
@@ -154,6 +168,10 @@ public sealed class ScraperOptions
         if (MaxRequestsPerMinute is < 1) throw new ArgumentOutOfRangeException(nameof(MaxRequestsPerMinute), MaxRequestsPerMinute, "Must be 1 or more");
         if (RequestsNeededBelow < 0) throw new ArgumentOutOfRangeException(nameof(RequestsNeededBelow), RequestsNeededBelow, "Must be 0 or more");
         if (MaxDepth is < 0) throw new ArgumentOutOfRangeException(nameof(MaxDepth), MaxDepth, "Must be 0 or more");
+        if (MaxConsecutiveHandlerErrors is < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxConsecutiveHandlerErrors), MaxConsecutiveHandlerErrors, "Must be 1 or more");
+        }
         if (MaxThrottleDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(MaxThrottleDelay), MaxThrottleDelay, "Must be positive");
         if (StateSaveInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(StateSaveInterval), StateSaveInterval, "Must be positive");
         if (RespectRobotsTxt && string.IsNullOrWhiteSpace(RobotsUserAgent)) throw new ArgumentException("RobotsUserAgent must not be empty", nameof(RobotsUserAgent));
