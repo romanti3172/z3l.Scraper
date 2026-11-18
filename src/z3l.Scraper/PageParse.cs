@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using z3l.Scraper.Crawling;
 using z3l.Scraper.Loading;
 using z3l.Scraper.Validation;
 
@@ -11,12 +12,14 @@ namespace z3l.Scraper;
 internal sealed class PageParse : IScrapeHost
 {
     private readonly Scraper _scraper;
+    private readonly CrawlScope _scope;
     private readonly List<ScrapeRequest> _found = [];
     private readonly HashSet<KeyHash> _seen = [];
 
-    private PageParse(Scraper scraper, ScrapeRequest page)
+    private PageParse(Scraper scraper, ScrapeRequest page, CrawlScope scope)
     {
         _scraper = scraper;
+        _scope = scope;
         if (!page.SkipDuplicateCheck) _seen.Add(KeyHash.Of(page.GetUniqueKey()));     // the page itself is seen, as in a run
     }
 
@@ -33,11 +36,15 @@ internal sealed class PageParse : IScrapeHost
 
     public bool Enqueue(ScrapeRequest request, ScrapeRequest? parent)
     {
-        if (!UrlHelper.TryNormalize(request.Url, out var url)) return false;
+        if (!UrlHelper.TryNormalizeUri(request.Url, out var uri)) return false;
         _scraper.RouteOf(request);
 
+        // as a run takes it: without the ignored query parameters, and a link out of the crawl scope is skipped
+        uri = _scope.Clean(uri);
+        if (parent != null && !_scope.Allows(uri)) return false;
+
         var depth = parent == null ? 0 : parent.Depth + 1;
-        request = request with { Url = url, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
+        request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
         KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey());
         lock (_found)
         {
@@ -51,19 +58,20 @@ internal sealed class PageParse : IScrapeHost
     internal static async Task<ParseResult> ParseAsync(Scraper scraper, ScrapeRequest request, PageResponse? response, CancellationToken token)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!UrlHelper.TryNormalize(request.Url, out var url))
+        if (!UrlHelper.TryNormalizeUri(request.Url, out var uri))
         {
             throw new ArgumentException($"The page needs an absolute http(s) URL: \"{request.Url}\"", nameof(request));
         }
         var route = scraper.RouteOf(request);
-        // own copy, as a run makes: the first attempt of the page
-        request = request with { Url = url, Attempts = 1, NotFoundCount = 0, HasThrottleSlot = false, SkipCache = false };
+        var scope = new CrawlScope(scraper.Options);
+        // own copy, as a run makes: the first attempt of the page, its URL without the ignored query parameters
+        request = request with { Url = scope.Clean(uri).AbsoluteUri, Attempts = 1, NotFoundCount = 0, HasThrottleSlot = false, SkipCache = false };
 
         response ??= await LoadAsync(scraper, request, token).ConfigureAwait(false);
         var verdict = ResponseValidator.Validate(request, response, scraper.Options.Rules.Build(request.Label));
         if (verdict.Outcome != ValidationOutcome.Ok) return new ParseResult(request, response, verdict, [], [], null);
 
-        var parse = new PageParse(scraper, request);
+        var parse = new PageParse(scraper, request, scope);
         var context = new ScrapeContext(parse, request, response, token);
         Exception? error = null;
         List<object>? items;

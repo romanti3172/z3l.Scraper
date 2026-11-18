@@ -19,8 +19,11 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 - **Proxies.** A proxy list from a text file (http, https, socks4, socks5, with logins), given out in turn; a proxy a site
   blocks rests for that site, a failing one rests for all.
 - **Politeness and limits.** A host that answers 429 / 503 or blocks is slowed down by itself while other hosts keep
-  full speed; robots.txt and its Crawl-delay on request; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
-  `MaxDepth`, `MaxRunDuration`.
+  full speed; robots.txt and its Crawl-delay on request; `MaxConcurrencyPerHost` and `HostDelay` for each host, and a
+  big site at its limit does not hold back the others; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
+  `MaxDepth`, `MaxRunDuration` for the run.
+- **Crawl scope.** `AllowedHosts` and `UrlFilter` keep the crawl on the sites and the parts of them you name; links that
+  differ only by tracking parameters (`utm_*`, `gclid`...) or by the order of their parameters are one page.
 - **Sitemaps.** Sitemap indexes, gzipped and text sitemaps in one call: `ctx.EnqueueSitemap(PageType.Item)`.
 - **Runs that survive a crash.** With `StatePath` the queue is saved as it goes and the next run continues;
   pages in work or not taken yet are done again, nothing is lost.
@@ -71,7 +74,8 @@ record Book(string? Title, string? Price, string Url);
 ```
 
 Relative links are resolved against the page (its final URL after redirects); links that are not http(s)
-(`mailto:`, `javascript:`, `tel:`) are skipped; pages already queued are skipped.
+(`mailto:`, `javascript:`, `tel:`) are skipped; pages already queued are skipped, also when their links differ only by
+tracking parameters or by the order of the query (see [Crawl scope](#crawl-scope)).
 
 ## Labels and page data
 
@@ -251,8 +255,9 @@ Assert.AreEqual(24, page.Found.Count);
 - One attempt with the loader of the label and `RequestTimeout`; no retries, robots.txt, throttle, cache, snapshots, state
   or `Stats`, so it may go while a run goes. A network error throws, and no response in time throws `TimeoutException`.
 - The page is checked with the rules of its label, and the handler runs only when it passes, as in a run.
-- `Found` takes what a run would take: duplicates and URLs that are not http(s) are left out, and `ctx.Enqueue` returns
-  false for them as in a run. `MaxDepth` and `MaxRequests` do not apply.
+- `Found` takes what a run would take: duplicates, URLs that are not http(s) and links out of the crawl scope are left
+  out, and `ctx.Enqueue` returns false for them as in a run; the URLs are without `IgnoredQueryParameters`. `MaxDepth`
+  and `MaxRequests` do not apply.
 - Items emitted before the handler threw stay in `Items`, and `Exception` holds what it threw. `Succeeded` is true when
   the page passed the checks and the handler finished.
 - A typed handler needs its data: `ParseAsync(ScrapeRequest.For(url, PageType.Item, teaser))`.
@@ -373,6 +378,19 @@ takes the next one. A `User-Agent` in `DefaultHeaders` or in the request still w
 
 ## Throttling
 
+```csharp
+options.MaxConcurrencyPerHost = 2;                     // loads of one host at once
+options.HostDelay = TimeSpan.FromSeconds(1);           // between the starts of two loads of one host
+```
+
+`MaxConcurrency` and `MaxRequestsPerMinute` are for the whole run; `MaxConcurrencyPerHost` and `HostDelay` are for each
+host (with its port). A load holds its host's slot until the loader answers, not while the handler runs, and each
+`HostDelay` is a random 0–50 % longer, so the loads do not come like a clock. A request whose host may not load now waits
+in the host's line, not in a worker: the workers load other hosts meanwhile, so a big site at its limit does not hold
+back the rest of the queue. The line keeps the priorities of its requests, and a request whose turn comes goes first in
+the queue. Requests in the lines count in `Stats.Queued`. With a queue loader the limit is on the requests of a host in
+its queue at once.
+
 `AutoThrottle = true` turns on slowing a host down; it is off by default. It is for scraping from one address, where a 429,
 a 503 or a block means the site is loaded too hard. With rotating proxies a block is about the proxy (the proxy list rests
 it), and remote loaders set their own pace: there slowing the whole host only slows the scraping. Without it a 429 or 503
@@ -383,7 +401,8 @@ When it is on, a host that answers 429 or 503, or whose responses are blocked (a
 1 s apart at first, twice as long after each next such answer (up to `MaxThrottleDelay`, 1 min), and the delay shrinks
 again by 10 % with each good page. A `Retry-After` pauses the host as long as it asks. Requests to other hosts keep
 going at full speed meanwhile: the line holds requests, not workers. robots.txt `Crawl-delay` (with `RespectRobotsTxt`)
-spaces a host the same way whatever `AutoThrottle` is.
+spaces a host the same way whatever `AutoThrottle` is. When a host has several of `HostDelay`, `Crawl-delay` and the
+delay of `AutoThrottle`, the longest wins.
 
 ## Sitemaps and robots.txt
 
@@ -414,6 +433,45 @@ crawled without rules.
 (a page found too deep is still taken if another path reaches it closer). `MaxDepth = 0` loads only the start requests
 and those of `RequestsNeeded`: the pages the handlers queue are skipped. To see them without loading them, use
 `ParseAsync`.
+
+## Crawl scope
+
+```csharp
+var options = new ScraperOptions
+{
+    AllowedHosts = { "shop.example" },                             // and its subdomains: www.shop.example, m.shop.example
+    UrlFilter = url => !url.AbsolutePath.StartsWith("/blog/"),     // and what of them to skip
+};
+```
+
+`AllowedHosts` keeps the crawl on the sites you name: a link that a handler queues to another host is skipped, and so is
+one that `UrlFilter` turns down. The filter gets the absolute URL and runs in the handlers, on several threads at once.
+Only the links found on pages are checked: start requests and those of `RequestsNeeded` are taken as given. A skipped
+link is not loaded, nor is the robots.txt of its host; it takes nothing of `MaxRequests` and is counted in
+`Stats.OutOfScope`. The first one is logged with the page it was found on, so a site that redirects to another domain,
+where every link points outside, shows at once. A run continued from its state file drops the saved links that the scope
+does not take any more.
+
+The `filter` of `Enqueue` picks the links of one call, so one list of links can go to several labels:
+
+```csharp
+var links = ctx.Html.XPathValues("//a/@href");
+ctx.Enqueue(links, PageType.Item, filter: url => url.AbsolutePath.StartsWith("/p/"));
+ctx.Enqueue(links, PageType.Listing, filter: url => url.AbsolutePath.StartsWith("/c/"));
+```
+
+Links that differ only by tracking parameters are one page: `IgnoredQueryParameters` are dropped from the URL of every
+request, so the page is loaded once, and `ctx.Request.Url` and your items get the clean URL. By default they are `utm_*`
+and the click ids of ads, mail and analytics (`gclid`, `fbclid`, `msclkid`, `yclid`, `ysclid`, `srsltid`, `_ga`,
+`mc_cid`...). Add those of sessions, or clear the list to load URLs as they are:
+
+```csharp
+options.IgnoredQueryParameters.Add("sessionid");
+options.IgnoredQueryParameters.Clear();
+```
+
+The order of query parameters makes no other page either: `?b=2&a=1` is a duplicate of `?a=1&b=2`, though each is
+loaded as it was found. Parameters of one name keep their order, since `?id=2&id=1` may be a list.
 
 ## Resuming a run
 
@@ -449,9 +507,14 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 |---|---|---|
 | `MaxConcurrency` | 8 | requests loaded and handled at once |
 | `MaxRequestsPerMinute` | none | loads spread evenly, retries included |
+| `MaxConcurrencyPerHost` | none | loads of one host at once; the others wait in its line, not in a worker |
+| `HostDelay` | none | least time between the starts of two loads of one host, each up to 50 % longer at random |
 | `MaxRequests` | none | accept at most this many requests; handy for trying selectors on a big site |
 | `RequestsNeededBelow` | 1000 | with `RequestsNeeded` handlers: ask for more requests when fewer are unfinished |
 | `MaxDepth` | none | deepest link to follow; start requests are depth 0, so 0 loads only them |
+| `AllowedHosts` | any host | hosts, with their subdomains, whose links are followed |
+| `UrlFilter` | none | which links found on pages are followed |
+| `IgnoredQueryParameters` | `utm_*`, `gclid`, `fbclid`, `yclid`... | dropped from URLs: links that differ only by them are one page |
 | `MaxRetries` | 5 | retries after the first attempt |
 | `NotFoundRetries` | 1 | retries of a page that looks missing |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
@@ -483,7 +546,7 @@ scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.
 ```
 
 `scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, from cache, retries, blocked,
-items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
+items, duplicates, out of scope, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
 
 `Stats.Reasons` tells why attempts gave no page, so a site that blocks or a selector that broke shows at once. Every retry
 and every failure is counted once, in a group of its kind, reason, label and host, most frequent first. The reason is the
