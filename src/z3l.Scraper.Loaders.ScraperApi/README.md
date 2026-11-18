@@ -75,7 +75,8 @@ var scraper = new Scraper(loader, new ScraperOptions { MaxConcurrency = 8 })    
 spends about 30 credits and takes some minutes, since a page the API cannot get takes it 70 seconds. Without the key they are
 skipped, and the other tests use a fake service that answers as the documentation says.
 
-Nobody has run them yet. What the loader assumes beyond the documentation, and they check:
+Nobody has run them yet: that needs a ScraperAPI key, and there is none. The open questions are in [TODO.md](TODO.md).
+What the loader assumes beyond the documentation, and the tests check:
 - The site's headers come back with the page, and `sa-final-url` gives the final URL: the documentation shows both only in
   the results of the async API.
 - A 500 may carry the site's status in `sa-statuscode`; without it no 500 sends a page one level up.
