@@ -252,7 +252,8 @@ Checks run in this order; the first that matches decides:
 | load error or timeout | Retry | as above |
 
 String checks ignore case. A blocked response or a 429 with `Retry-After` waits as long as the server asks
-(up to `MaxRetryDelay`).
+(up to `MaxRetryDelay`). Keep the reason of a custom check short and the same for alike pages (`"page too short"`, not
+the length): `Stats.Reasons` groups the attempts by it.
 
 ## Proxies
 
@@ -430,6 +431,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 ```csharp
 // stream
 await foreach (var item in scraper.RunAsync(requests, cancellationToken)) { ... }
+scraper.FailedRequests;       // the requests that failed, the same as result.Failed below
 
 // or collect
 var result = await scraper.RunToListAsync(requests);
@@ -443,6 +445,23 @@ scraper.RequestFailed += failed => logger.LogWarning("{Url}: {Message}", failed.
 
 `scraper.Stats` is live during the run: succeeded, failed, pending, queued, in progress, loads, from cache, retries, blocked,
 items, duplicates, elapsed time. Breaking out of `await foreach` stops the run; the scraper can be run again.
+
+`Stats.Reasons` tells why attempts gave no page, so a site that blocks or a selector that broke shows at once. Every retry
+and every failure is counted once, in a group of its kind, reason, label and host, most frequent first. The reason is the
+same for alike attempts:
+- the check that failed: `status 403`, `marker "captcha"`, `no "price"`;
+- the timeout;
+- the kind of a load error (`ConnectionError`, `ProxyTunnelError`), not its message, which names the proxy and the IP;
+- the type of what a handler threw, or the message of its `RetryRequestException` or `NonRetryableException`.
+
+`Count` is how many times, `Failed` how many of them ended their request, and `Example` and `ExampleUrl` keep the message
+and the URL of the last one. The last log line of a run names the first five:
+
+```
+Scraping finished: ... Top reasons: 8711x blocked: marker "captcha" (Item, shop.com; 812 failed); 2040x timeout: 120 s (Item, shop.com); ...
+```
+
+Up to 1000 groups are kept; past them, new ones are counted in an "other reasons" group of their kind.
 
 ## Loaders
 
@@ -557,8 +576,8 @@ limits of the classes (`ReadAsync`, `WriteAsync`, `DeleteAsync` and `CountStored
 
 ## Logging
 
-Pass an `ILogger` to the constructor: progress, failures and retries (debug level) go there. The scraper writes
-nothing to the console by itself.
+Pass an `ILogger` to the constructor: progress, failures and retries (debug level) go there, and the last line of a
+run names the most frequent reasons of `Stats.Reasons`. The scraper writes nothing to the console by itself.
 
 ```csharp
 var scraper = new Scraper(loader, options, loggerFactory.CreateLogger("scraper"));

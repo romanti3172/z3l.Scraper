@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace z3l.Scraper;
@@ -29,6 +30,78 @@ public enum FailureReason
 /// <param name="StatusCode">Status code of the last response, if there was one.</param>
 /// <param name="Exception">Exception of the last attempt, if there was one.</param>
 public sealed record FailedRequest(ScrapeRequest Request, FailureReason Reason, string Message, int? StatusCode, Exception? Exception);
+
+/// <summary>What kind of trouble an attempt ran into: the groups of <see cref="ScraperStats.Reasons"/>.</summary>
+public enum ReasonKind
+{
+    /// <summary>
+    /// The response was recognised as blocked: a blocked status or marker, or the handler said so
+    /// (<see cref="RetryRequestException"/> with <c>blocked</c>).
+    /// </summary>
+    Blocked,
+    /// <summary>
+    /// The response was not the page: a check failed (a status, an incomplete or empty body, <c>MustContain</c>...), or the handler
+    /// asked for a retry.
+    /// </summary>
+    BadPage,
+    /// <summary>The page does not exist: 404, 410 or a not found marker.</summary>
+    NotFound,
+    /// <summary>No response within <see cref="ScraperOptions.RequestTimeout"/>.</summary>
+    Timeout,
+    /// <summary>The load threw: a network, TLS or proxy error.</summary>
+    LoadError,
+    /// <summary>The handler threw an exception of its own.</summary>
+    HandlerError,
+    /// <summary>The loader or the handler threw <see cref="NonRetryableException"/>.</summary>
+    NonRetryable,
+    /// <summary>robots.txt of the host disallows the page (<see cref="ScraperOptions.RespectRobotsTxt"/>).</summary>
+    DisallowedByRobotsTxt,
+    /// <summary>The URL of a request given by a <see cref="Scraper.RequestsNeeded"/> handler is not an absolute http(s) URL.</summary>
+    BadUrl,
+}
+
+/// <summary>
+/// A group of <see cref="ScraperStats.Reasons"/>: how many times attempts of one label on one host ran into one reason, and how many
+/// of those ended their request.
+/// </summary>
+/// <param name="Kind">What kind of trouble.</param>
+/// <param name="Reason">
+/// The reason, the same for every attempt of the group: the check that failed (<c>status 403</c>, <c>marker "captcha"</c>,
+/// <c>no "price"</c>), the timeout, the kind of a load error (<c>ConnectionError</c>, <c>ProxyTunnelError</c>), the type of the
+/// exception a handler threw, or the message of a <see cref="RetryRequestException"/> or <see cref="NonRetryableException"/>.
+/// </param>
+/// <param name="Label">Label of the requests; empty in the "other reasons" group.</param>
+/// <param name="Host">Host of the requests, with the port when it is not the default one; empty in the "other reasons" group.</param>
+/// <param name="Count">How many times: retries and failures together.</param>
+/// <param name="Failed">How many of them were the last attempt of a request that failed.</param>
+/// <param name="Example">
+/// The message of the last of them, with the details the reason leaves out: an exception message names the proxy, the IP...
+/// </param>
+/// <param name="ExampleUrl">The URL of the last of them.</param>
+public sealed record ReasonCount(ReasonKind Kind, string Reason, string Label, string Host, long Count, long Failed, string Example, string ExampleUrl)
+{
+    /// <summary>One line, as the last log line of a run shows it: <c>8711x blocked: marker "captcha" (Item, shop.com; 120 failed)</c>.</summary>
+    public override string ToString()
+    {
+        var where = string.Join(", ", new[] { Label, Host }.Where(x => x.Length > 0));
+        if (Failed > 0) where = where.Length > 0 ? $"{where}; {Failed} failed" : $"{Failed} failed";
+        return where.Length > 0 ? $"{Count}x {NameOf(Kind)}: {Reason} ({where})" : $"{Count}x {NameOf(Kind)}: {Reason}";
+    }
+
+    private static string NameOf(ReasonKind kind) => kind switch
+    {
+        ReasonKind.Blocked => "blocked",
+        ReasonKind.BadPage => "bad page",
+        ReasonKind.NotFound => "not found",
+        ReasonKind.Timeout => "timeout",
+        ReasonKind.LoadError => "load error",
+        ReasonKind.HandlerError => "handler error",
+        ReasonKind.NonRetryable => "non-retryable",
+        ReasonKind.DisallowedByRobotsTxt => "robots.txt",
+        ReasonKind.BadUrl => "bad url",
+        _ => kind.ToString(),
+    };
+}
 
 /// <summary>Live counters of a run. Read them at any time from any thread.</summary>
 public sealed class ScraperStats
@@ -81,6 +154,57 @@ public sealed class ScraperStats
     /// host: the log says which one.
     /// </summary>
     public bool StoppedByHandlerErrors { get; internal set; }
+
+    /// <summary>
+    /// Why attempts did not give a page, most frequent first: every retry and every failure is counted once, in a group of its kind,
+    /// reason, label and host. Live during the run; the last log line of a run names the first five. Up to 1000 groups: past them a
+    /// new group is counted in an "other reasons" group of its kind.
+    /// </summary>
+    public IReadOnlyList<ReasonCount> Reasons =>
+    [
+        .. _reasons
+            .Select(pair =>
+            {
+                var last = Volatile.Read(ref pair.Value.Last);
+                return new ReasonCount(pair.Key.Kind, pair.Key.Reason, pair.Key.Label, pair.Key.Host, Interlocked.Read(ref pair.Value.Count),
+                    Interlocked.Read(ref pair.Value.Failed), last?.Message ?? "", last?.Url ?? "");
+            })
+            .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.Kind)
+            .ThenBy(x => x.Reason, StringComparer.Ordinal)
+            .ThenBy(x => x.Label, StringComparer.Ordinal)
+            .ThenBy(x => x.Host, StringComparer.Ordinal),
+    ];
+
+    internal const int MaxReasonGroups = 1000;
+    internal const string OtherReasons = "other reasons";
+
+    private readonly ConcurrentDictionary<(ReasonKind Kind, string Reason, string Label, string Host), ReasonTally> _reasons = new();
+    private int _reasonGroups;
+
+    private sealed class ReasonTally
+    {
+        public long Count, Failed;
+        public ReasonExample? Last;
+    }
+
+    private sealed record ReasonExample(string Message, string Url);
+
+    /// <summary>Counts an attempt that gave no page in its group; past <see cref="MaxReasonGroups"/> a new group goes to "other reasons".</summary>
+    internal void AddReason(ReasonKind kind, string reason, string label, string host, bool failed, string example, string url)
+    {
+        var key = (kind, reason, label, host);
+        if (!_reasons.TryGetValue(key, out var tally))
+        {
+            if (Volatile.Read(ref _reasonGroups) >= MaxReasonGroups) key = (kind, OtherReasons, "", "");
+            var added = new ReasonTally();
+            tally = _reasons.GetOrAdd(key, added);
+            if (ReferenceEquals(tally, added)) Interlocked.Increment(ref _reasonGroups);
+        }
+        Interlocked.Increment(ref tally.Count);
+        if (failed) Interlocked.Increment(ref tally.Failed);
+        Volatile.Write(ref tally.Last, new ReasonExample(example, url));
+    }
 
     internal void Start() => _clock.Start();
     internal void Stop() => _clock.Stop();
