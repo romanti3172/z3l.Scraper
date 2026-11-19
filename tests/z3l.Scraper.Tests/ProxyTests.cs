@@ -360,6 +360,8 @@ public sealed class ProxyTests
         public string Address { get; private set; } = "";
         public ConcurrentQueue<string> Requests { get; } = new();
         public ConcurrentQueue<string> UserAgents { get; } = new();
+        public ConcurrentQueue<string> Cookies { get; } = new();
+        public volatile int Status;
 
         public static async Task<FakeProxy> StartAsync(int status, string body, TimeSpan delay = default, string host = "127.0.0.1")
         {
@@ -367,18 +369,20 @@ public sealed class ProxyTests
             builder.Logging.ClearProviders();
             builder.WebHost.UseUrls($"http://{host}:0");
             var app = builder.Build();
-            var proxy = new FakeProxy(app);
+            var proxy = new FakeProxy(app) { Status = status };
             app.Run(async http =>
             {
                 proxy.Requests.Enqueue($"{http.Request.Host}{http.Request.Path}");
                 proxy.UserAgents.Enqueue(http.Request.Headers.UserAgent.ToString());
+                proxy.Cookies.Enqueue(http.Request.Headers.Cookie.ToString());
                 if (delay > TimeSpan.Zero)
                 {
                     try { await Task.Delay(delay, http.RequestAborted); }
                     catch (OperationCanceledException) { return; }
                 }
-                http.Response.StatusCode = status;
+                http.Response.StatusCode = proxy.Status;
                 http.Response.ContentType = "text/html";
+                http.Response.Headers.SetCookie = $"visit={proxy.Requests.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)}; Path=/";      // the site's cookie, for the page's host
                 await http.Response.WriteAsync(body);
             });
             await app.StartAsync();
@@ -813,23 +817,43 @@ public sealed class ProxyTests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task Loader_EveryProxyKeepsOneUserAgent()
+    public async Task Loader_ASessionKeepsItsProxyUserAgentAndCookies_ABlockedOneComesBackWithNeither()
     {
         await using var first = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
         await using var second = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
-        using var loader = new HttpPageLoader(new HttpPageLoaderOptions
+        var clock = new ManualClock();
+        var proxies = new ProxyList([first.Address, second.Address], ProxyBlockPolicy.Block10Minutes) { Clock = clock };
+        using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies, UserAgents = new UserAgentList(["UA-1", "UA-2", "UA-3"]) });
+
+        async Task<PageResponse> Load(int i, bool blocked = false)
         {
-            Proxies = new ProxyList([first.Address, second.Address]),
-            UserAgents = new UserAgentList(["UA-1", "UA-2", "UA-3"]),
-        });
+            var request = new ScrapeRequest($"http://{Site}/p/{i}");
+            var response = await loader.LoadAsync(request, CancellationToken.None);
+            if (blocked) loader.ReportBlocked(request, response, "status 403");
+            else loader.ReportGoodResponse(request, response);
+            return response;
+        }
 
-        for (var i = 0; i < 6; i++) await loader.LoadAsync($"http://{Site}/p/{i}", CancellationToken.None);
+        for (var i = 1; i <= 3; i++) await Load(i);
+        CollectionAssert.AreEqual(new[] { "UA-1", "UA-1", "UA-1" }, first.UserAgents.ToArray(), "a session that does well goes on");
+        CollectionAssert.AreEqual(new[] { "", "visit=1", "visit=2" }, first.Cookies.ToArray());
+        Assert.IsEmpty(second.Requests);
 
-        Assert.HasCount(3, first.UserAgents);
-        Assert.HasCount(3, second.UserAgents);
-        Assert.HasCount(1, first.UserAgents.Distinct());
-        Assert.HasCount(1, second.UserAgents.Distinct());
-        Assert.AreNotEqual(first.UserAgents.First(), second.UserAgents.First());
+        first.Status = 403;
+        await Load(4, blocked: true);                   // the session is thrown away, first rests 10 minutes for the site
+        await Load(5);
+        await Load(6);
+        CollectionAssert.AreEqual(new[] { "UA-2", "UA-2" }, second.UserAgents.ToArray());
+        CollectionAssert.AreEqual(new[] { "", "visit=1" }, second.Cookies.ToArray(), "a new session starts with an empty cookie jar");
+
+        first.Status = 200;
+        second.Status = 403;
+        clock.Now = clock.Now.AddMinutes(11);
+        await Load(7, blocked: true);
+        await Load(8);
+        Assert.AreEqual("UA-3", first.UserAgents.Last(), "back from its rest with a new user agent");
+        Assert.AreEqual("", first.Cookies.Last(), "and without the cookies of the session the site blocked");
+        Assert.AreEqual(1, proxies.Status().Sum(s => s.Sessions));
     }
 
     [TestMethod]

@@ -242,6 +242,8 @@ public sealed class RabbitMqLoaderWorker : IAsyncDisposable
         finally
         {
             response.ReleaseText();
+            try { (_loader as IBlockAwarePageLoader)?.ReportDone(request, response); }     // a proxy session goes on to the next load
+            catch (Exception ex) { _logger.LogWarning("ReportDone of {Url} failed: {Message}", request.Url, ex.Message); }
         }
     }
 

@@ -60,4 +60,13 @@ public interface IBlockAwarePageLoader : IPageLoader
     void ReportGoodResponse(ScrapeRequest request, PageResponse response)
     {
     }
+
+    /// <summary>
+    /// Called for every response from this loader when the scraper is done with it, after the other reports: whatever it was (a page, a
+    /// block, a 404, a 429, a handler that failed), nothing more will be said about it. A loader that keeps a session busy until the
+    /// verdict on its answer (<see cref="BlockAwarePageLoader"/>) frees it here if no block or bad response came.
+    /// </summary>
+    void ReportDone(ScrapeRequest request, PageResponse response)
+    {
+    }
 }

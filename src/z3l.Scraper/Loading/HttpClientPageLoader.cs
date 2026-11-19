@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Security;
@@ -14,9 +13,10 @@ public class HttpClientPageLoaderOptions
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
 
     /// <summary>
-    /// User agents to rotate instead of <see cref="UserAgent"/>. With <see cref="Proxies"/> every proxy takes one user agent and keeps
-    /// it while the loader lives (as it keeps its cookies), so a site sees one browser per address; without proxies every request takes
-    /// the next one. A User-Agent in <see cref="DefaultHeaders"/> or in the request still wins.
+    /// User agents to rotate instead of <see cref="UserAgent"/>. With <see cref="Proxies"/> every proxy session (<see cref="ProxySession"/>)
+    /// takes the next one and keeps it while it lives, as it keeps its cookies: a site sees one browser per address, and a new session
+    /// (after a failure or a block) is a new browser. Without proxies every request takes the next one. A User-Agent in
+    /// <see cref="DefaultHeaders"/> or in the request still wins.
     /// </summary>
     public UserAgentList? UserAgents { get; set; }
 
@@ -27,9 +27,11 @@ public class HttpClientPageLoaderOptions
     public IWebProxy? Proxy { get; set; }
 
     /// <summary>
-    /// Proxies to rotate: each load takes the next one that may load from the site, a blocked answer rests the proxy for that
-    /// site (<see cref="ProxyList.BlockPolicy"/>), failures rest it for all sites. http, https (TLS to the proxy), socks4, socks4a and
-    /// socks5 proxies, with or without a login (<see cref="ProxyAddress.TryParse"/>). Every proxy has its own connections and cookies.
+    /// Proxies to load through, in sessions (<see cref="ProxySession"/>): a session is a proxy, a user agent and an HttpClient with its
+    /// own connections and cookies. A session that did well serves the next load; a failure, a block or a bad response throws it away
+    /// whole, the proxy rests as the list says (<see cref="ProxyList.BlockPolicy"/> for blocks, failures for all sites), and the next load
+    /// opens a new session on another proxy. http, https (TLS to the proxy), socks4, socks4a and socks5 proxies, with or without a login
+    /// (<see cref="ProxyAddress.TryParse"/>).
     /// </summary>
     public ProxyList? Proxies { get; set; }
 
@@ -42,7 +44,7 @@ public class HttpClientPageLoaderOptions
     /// </summary>
     public bool AcceptAnyProxyCertificate { get; set; }
 
-    /// <summary>Keep cookies between requests (one cookie jar for the loader, or one per proxy).</summary>
+    /// <summary>Keep cookies between requests (one cookie jar for the loader, or one per proxy session).</summary>
     public bool UseCookies { get; set; } = true;
 
     /// <summary>Largest body to read; a bigger response fails the request without retries. 0 means no limit.</summary>
@@ -50,8 +52,9 @@ public class HttpClientPageLoaderOptions
 }
 
 /// <summary>
-/// Base of the loaders that send requests with <see cref="HttpClient"/>, directly or through rotating proxies: one client per proxy,
-/// with its own connections and cookies, and the body read into pooled buffers up to
+/// Base of the loaders that send requests with <see cref="HttpClient"/>, directly or through proxies: one client per proxy session
+/// (<see cref="ProxySession"/>), with its own connections and cookies, thrown away with the session, and the body read into pooled
+/// buffers up to
 /// <see cref="HttpClientPageLoaderOptions.MaxResponseBytes"/>. A derived class decides what the request looks like
 /// (<see cref="CreateMessage"/>) and may change the handler (<see cref="CreateHandler"/>). Thread-safe; dispose it when the scraping is
 /// over.
@@ -60,7 +63,6 @@ public abstract class HttpClientPageLoader : BlockAwarePageLoader, IDisposable
 {
     private readonly HttpClient? _client;
     private readonly Lazy<HttpClient>? _ownClient;
-    private readonly ConcurrentDictionary<string, Lazy<HttpClient>> _proxyClients = new();
 
     /// <summary>Creates a loader with its own clients (decompression, cookies, connection pooling), made on first use.</summary>
     /// <exception cref="ArgumentException">Both <see cref="HttpClientPageLoaderOptions.Proxy"/> and <see cref="HttpClientPageLoaderOptions.Proxies"/> are set.</exception>
@@ -75,13 +77,13 @@ public abstract class HttpClientPageLoader : BlockAwarePageLoader, IDisposable
     }
 
     /// <summary>Uses an existing client (for example from <c>IHttpClientFactory</c>); it is not disposed by the loader.</summary>
-    /// <exception cref="ArgumentException"><see cref="HttpClientPageLoaderOptions.Proxies"/> is set: rotating proxies need clients of the loader.</exception>
+    /// <exception cref="ArgumentException"><see cref="HttpClientPageLoaderOptions.Proxies"/> is set: proxy sessions need clients of the loader.</exception>
     protected HttpClientPageLoader(HttpClient client, HttpClientPageLoaderOptions options)
         : base(null, (options ?? throw new ArgumentNullException(nameof(options))).UserAgents, options.UserAgent)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         Options = options;
-        if (options.Proxies != null) throw new ArgumentException("Rotating proxies need clients made by the loader: use the constructor with options", nameof(options));
+        if (options.Proxies != null) throw new ArgumentException("Proxy sessions need clients made by the loader: use the constructor with options", nameof(options));
     }
 
     /// <summary>Settings.</summary>
@@ -97,7 +99,8 @@ public abstract class HttpClientPageLoader : BlockAwarePageLoader, IDisposable
     protected abstract HttpRequestMessage CreateMessage(ScrapeRequest request, Uri uri, string? userAgent);
 
     /// <summary>
-    /// Makes the handler of a client: one for the loader without <see cref="HttpClientPageLoaderOptions.Proxies"/>, one for every proxy.
+    /// Makes the handler of a client: one for the loader without <see cref="HttpClientPageLoaderOptions.Proxies"/>, one for every proxy
+    /// session.
     /// The default is a <see cref="SocketsHttpHandler"/> with decompression, cookies (<see cref="HttpClientPageLoaderOptions.UseCookies"/>),
     /// connections renewed every 5 minutes, redirects and the proxy. Override it to wrap that one (<c>base.CreateHandler(proxy)</c>:
     /// Polly, logging, signed requests) or to replace it (a TLS library, another outgoing address); a replacement must go through
@@ -162,14 +165,23 @@ public abstract class HttpClientPageLoader : BlockAwarePageLoader, IDisposable
     }
 
     /// <inheritdoc />
-    protected sealed override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, ProxyList.Entry? proxy, string? userAgent,
+    protected sealed override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, ProxySession? session, string? userAgent,
         CancellationToken cancellationToken)
     {
-        var client = proxy == null
+        // a session serves one load at a time: its client is made on its first load, with an empty cookie jar
+        var client = session == null
             ? _client ?? _ownClient!.Value
-            : _proxyClients.GetOrAdd(proxy.Address.Key, _ => new Lazy<HttpClient>(() => CreateClient(proxy.Address.ToWebProxy()))).Value;
+            : session.State as HttpClient ?? (HttpClient)(session.State = CreateClient(session.Proxy.Address.ToWebProxy()));
         using var message = CreateMessage(request, uri, userAgent);
         return await SendAsync(client, message, request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The session is thrown away: its client goes with its connections and cookies.</summary>
+    protected sealed override void CloseSession(ProxySession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        (session.State as HttpClient)?.Dispose();
+        session.State = null;
     }
 
     private HttpClient CreateClient(IWebProxy? proxy) => new(CreateHandler(proxy)) { Timeout = Timeout.InfiniteTimeSpan };   // the scraper applies RequestTimeout
@@ -248,10 +260,6 @@ public abstract class HttpClientPageLoader : BlockAwarePageLoader, IDisposable
     {
         if (!disposing) return;
         if (_ownClient is { IsValueCreated: true }) _ownClient.Value.Dispose();
-        foreach (var client in _proxyClients.Values)
-        {
-            if (client.IsValueCreated) client.Value.Dispose();
-        }
-        _proxyClients.Clear();
+        CloseSessions();
     }
 }

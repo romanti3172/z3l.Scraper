@@ -96,8 +96,8 @@
         <table class="trouble">
           <thead><tr><th>The site does</th><th>z3l.Scraper</th></tr></thead>
           <tbody>
-            <tr><td>403, 429, a captcha, "Just a moment..."</td><td>Recognised as a block: the proxy that got it rests for that site (an hour by default), the page is retried through another proxy. With AutoThrottle (for scraping from one address) the host slows down too.</td></tr>
-            <tr><td>A proxy dies, hangs or wants a login</td><td>One failure puts it after the clean proxies; three in a row and it rests for every site.</td></tr>
+            <tr><td>403, 429, a captcha, "Just a moment..."</td><td>Recognised as a block: the proxy that got it rests for that site (an hour by default), its session (cookies, user agent) is thrown away, and the page is retried through a new session on another proxy. With AutoThrottle (for scraping from one address) the host slows down too.</td></tr>
+            <tr><td>A proxy dies, hangs or wants a login</td><td>Its session is thrown away; one failure puts the proxy after the clean ones, three in a row and it rests for every site.</td></tr>
             <tr><td>A proxy answers with its own page</td><td>The page fails <code>MustContain</code> and is retried; the proxy goes after the clean ones for that site, three such answers in a row and it rests there.</td></tr>
             <tr><td>429 with Retry-After</td><td>The page is retried as late as asked. With AutoThrottle the whole host pauses; pages of other hosts keep loading.</td></tr>
             <tr><td>500, 503, a timeout, a dropped connection</td><td>Retried with exponential backoff and jitter, up to the limit you set.</td></tr>

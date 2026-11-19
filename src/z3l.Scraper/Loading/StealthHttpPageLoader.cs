@@ -22,7 +22,7 @@ public sealed class StealthHttpPageLoaderOptions : HttpClientPageLoaderOptions
 }
 
 /// <summary>
-/// Loads pages with <see cref="HttpClient"/> the way a browser asks for them, directly or through rotating proxies: over HTTP/2, with
+/// Loads pages with <see cref="HttpClient"/> the way a browser asks for them, directly or through proxy sessions: over HTTP/2, with
 /// the headers of the browser of the user agent in its order, Referer and Sec-Fetch-* from the page the link was found on.
 /// <list type="bullet">
 /// <item>Chrome and Edge: client hints (<c>sec-ch-ua</c> with the brands as Chromium makes them for the version, <c>sec-ch-ua-mobile</c>,
@@ -33,7 +33,7 @@ public sealed class StealthHttpPageLoaderOptions : HttpClientPageLoaderOptions
 /// <c>*/*</c>, cors, empty). A request that is neither GET nor HEAD sends Origin.</item>
 /// </list>
 /// The user agent comes from <see cref="HttpClientPageLoaderOptions.UserAgent"/> or <see cref="HttpClientPageLoaderOptions.UserAgents"/>
-/// (one per proxy), or from a User-Agent in the default headers or the request. A header of
+/// (one per proxy session), or from a User-Agent in the default headers or the request. A header of
 /// <see cref="HttpClientPageLoaderOptions.DefaultHeaders"/> or of the request replaces the browser's header of the same name in its
 /// place, and one the browser does not send goes after them.
 /// <para>

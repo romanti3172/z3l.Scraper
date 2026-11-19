@@ -15,7 +15,7 @@ public sealed class HttpPageLoaderOptions : HttpClientPageLoaderOptions
 }
 
 /// <summary>
-/// Loads pages with <see cref="HttpClient"/>, directly or through rotating proxies, sending the request as it is: HTTP/1.1, the default
+/// Loads pages with <see cref="HttpClient"/>, directly or through proxy sessions (<see cref="ProxySession"/>), sending the request as it is: HTTP/1.1, the default
 /// headers, the headers of the request and the user agent. Thread-safe; dispose it when the scraping is over.
 /// <see cref="StealthHttpPageLoader"/> asks for pages the way a browser does.
 /// </summary>
@@ -29,7 +29,7 @@ public sealed class HttpPageLoader : HttpClientPageLoader
     }
 
     /// <summary>Uses an existing client (for example from <c>IHttpClientFactory</c>); it is not disposed by the loader.</summary>
-    /// <exception cref="ArgumentException"><see cref="HttpClientPageLoaderOptions.Proxies"/> is set: rotating proxies need clients of the loader.</exception>
+    /// <exception cref="ArgumentException"><see cref="HttpClientPageLoaderOptions.Proxies"/> is set: proxy sessions need clients of the loader.</exception>
     public HttpPageLoader(HttpClient client, HttpPageLoaderOptions? options = null)
         : base(client, options ?? new HttpPageLoaderOptions())
     {

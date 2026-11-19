@@ -145,13 +145,16 @@ public sealed partial record ProxyAddress(string Scheme, string Host, int Port, 
 /// <param name="Dead">Resting after failures in a row.</param>
 /// <param name="BlockedSites">Sites it rests for now (blocked, or bad responses in a row).</param>
 /// <param name="BadResponses">Answers that were not the page (its own page, a cut-off one...).</param>
+/// <param name="Sessions">Sessions of loaders open on it now (see <see cref="BlockAwarePageLoader"/>).</param>
 public sealed record ProxyStatus(ProxyAddress Address, long Loads, long Successes, long Failures, long Blocks, bool Dead, int BlockedSites,
-    long BadResponses = 0);
+    long BadResponses = 0, int Sessions = 0);
 
 /// <summary>
 /// Proxies for <see cref="HttpPageLoader"/>: given out in turn, put to rest for a site that blocks them
 /// (<see cref="ProxyBlockPolicy"/>), and for every site after <see cref="MaxConsecutiveFailures"/> failures in a row.
 /// One failure or bad response already puts a proxy after the clean ones for a while: it is taken only when no clean one is free.
+/// The loaders built on <see cref="BlockAwarePageLoader"/> open a session on a proxy (a client with its cookies and a user agent)
+/// and keep loading through it while it does well; a new session takes a proxy no other session uses when there is one.
 /// When every proxy rests for a site, a load waits for the first one to come back (the scraper's RequestTimeout limits the wait).
 /// Thread-safe.
 /// </summary>
@@ -281,7 +284,7 @@ public sealed class ProxyList
         {
             var now = Clock.GetUtcNow();
             return [.. _entries.Select(e => new ProxyStatus(e.Address, e.Loads, e.Successes, e.Failures, e.Blocks, e.DeadUntil > now, e.CountBlockedSites(now),
-                e.BadResponses))];
+                e.BadResponses, e.Sessions))];
         }
     }
 
@@ -290,7 +293,7 @@ public sealed class ProxyList
     {
         var status = Status();
         return $"{status.Count} proxies: {status.Count(s => !s.Dead)} alive, {status.Count(s => s.Dead)} resting after failures, " +
-               $"{status.Count(s => s.BlockedSites > 0)} resting for some site; {status.Sum(s => s.Loads)} loads, {status.Sum(s => s.Failures)} failures, " +
+               $"{status.Count(s => s.BlockedSites > 0)} resting for some site, {status.Count(s => s.Sessions > 0)} in sessions; {status.Sum(s => s.Loads)} loads, {status.Sum(s => s.Failures)} failures, " +
                $"{status.Sum(s => s.Blocks)} blocks, {status.Sum(s => s.BadResponses)} bad responses";
     }
 
@@ -304,7 +307,15 @@ public sealed class ProxyList
     /// <param name="site">Host of the page.</param>
     /// <param name="cancellationToken">Ends the wait.</param>
     /// <exception cref="NonRetryableException">Every proxy is removed for the site (<see cref="ProxyBlockPolicy.Remove"/>).</exception>
-    public async Task<Entry> AcquireAsync(string site, CancellationToken cancellationToken)
+    public Task<Entry> AcquireAsync(string site, CancellationToken cancellationToken) => TakeAsync(site, session: false, cancellationToken);
+
+    /// <summary>
+    /// A proxy for a new session of a loader: as <see cref="AcquireAsync(string, CancellationToken)"/>, but a proxy no session uses
+    /// goes first, and the proxy counts the session until <see cref="CloseSession"/>.
+    /// </summary>
+    internal Task<Entry> AcquireForSessionAsync(string site, CancellationToken cancellationToken) => TakeAsync(site, session: true, cancellationToken);
+
+    private async Task<Entry> TakeAsync(string site, bool session, CancellationToken cancellationToken)
     {
         while (true)
         {
@@ -314,20 +325,21 @@ public sealed class ProxyList
                 ReloadIfChanged();
                 var now = Clock.GetUtcNow();
                 var count = _entries.Count;
-                var fallback = -1;
+                // clean and free first; then clean with sessions on it (fewest first), pessimized and free, pessimized with sessions
+                int best = -1, bestRank = int.MaxValue, bestSessions = int.MaxValue;
                 for (var i = 0; i < count; i++)
                 {
                     var index = (_cursor + i) % count;
                     var entry = _entries[index];
                     if (entry.DeadUntil > now || entry.BlockedUntil(site) > now) continue;
-                    if (IsPessimized(entry, site, now))
+                    var rank = (IsPessimized(entry, site, now) ? 2 : 0) + (entry.Sessions > 0 ? 1 : 0);
+                    if (rank == 0) return Take(index);
+                    if (rank < bestRank || (rank == bestRank && entry.Sessions < bestSessions))
                     {
-                        if (fallback < 0) fallback = index;     // taken only when no clean proxy is free
-                        continue;
+                        (best, bestRank, bestSessions) = (index, rank, entry.Sessions);
                     }
-                    return Take(index);
                 }
-                if (fallback >= 0) return Take(fallback);
+                if (best >= 0) return Take(best);
 
                 var next = _entries.Select(e => e.DeadUntil > e.BlockedUntil(site) ? e.DeadUntil : e.BlockedUntil(site)).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
                 if (next == DateTimeOffset.MaxValue)
@@ -348,8 +360,38 @@ public sealed class ProxyList
             var entry = _entries[index];
             _cursor = (index + 1) % _entries.Count;
             entry.Loads++;
+            if (session) entry.Sessions++;
             _waitLogged.Remove(site);
             return entry;
+        }
+    }
+
+    /// <summary>
+    /// Whether a session open on <paramref name="entry"/> may load from <paramref name="site"/> now: the proxy is still in the list
+    /// and rests neither after failures nor for the site.
+    /// </summary>
+    internal bool MayLoad(Entry entry, string site)
+    {
+        lock (_lock)
+        {
+            ReloadIfChanged();
+            var now = Clock.GetUtcNow();
+            return entry.Listed && entry.DeadUntil <= now && entry.BlockedUntil(site) <= now;
+        }
+    }
+
+    /// <summary>A session open on the proxy takes another load.</summary>
+    internal void CountLoad(Entry entry)
+    {
+        lock (_lock) entry.Loads++;
+    }
+
+    /// <summary>A session that <see cref="AcquireForSessionAsync"/> opened on the proxy is closed.</summary>
+    internal void CloseSession(Entry entry)
+    {
+        lock (_lock)
+        {
+            if (entry.Sessions > 0) entry.Sessions--;
         }
     }
 
@@ -490,6 +532,7 @@ public sealed class ProxyList
             _logger.LogWarning("{Source} has no proxies now: the old list stays", _source.Name);
             return;
         }
+        foreach (var gone in _entries.Except(entries)) gone.Listed = false;
         _entries = entries;
         _cursor = 0;
         _logger.LogInformation("Proxy list {Source} read again: {Count} proxies", _source.Name, entries.Count);
@@ -520,7 +563,8 @@ public sealed class ProxyList
         internal Dictionary<string, DateTimeOffset> BlockedSites { get; } = new(StringComparer.OrdinalIgnoreCase);
         internal Dictionary<string, (int Count, DateTimeOffset At)> BadResponsesInARow { get; } = new(StringComparer.OrdinalIgnoreCase);
         internal DateTimeOffset DeadUntil, LastFailureAt;
-        internal int FailuresInARow;
+        internal int FailuresInARow, Sessions;
+        internal bool Listed = true;
         internal long Loads, Successes, Failures, Blocks, BadResponses;
 
         internal DateTimeOffset BlockedUntil(string site) => BlockedSites.TryGetValue(site, out var until) ? until : DateTimeOffset.MinValue;
