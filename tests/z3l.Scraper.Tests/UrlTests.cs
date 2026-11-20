@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace z3l.Scraper.Tests;
 
 [TestClass]
@@ -57,6 +59,68 @@ public sealed class UrlTests
         Assert.AreNotEqual(b, c);
         Assert.AreNotEqual(b, d);
         Assert.AreEqual("own", new ScrapeRequest("https://s.test/p") { UniqueKey = "own" }.GetUniqueKey());
+    }
+
+    [TestMethod]
+    [DataRow("https://s.test/p?b=2&a=1#x")]
+    [DataRow("HTTPS://S.TEST:443/P/5")]
+    [DataRow("https://s.test/a b%7e")]
+    [DataRow("https://s.test/50%/%7e")]            // the parse escapes the broken '%' and keeps %7e; a parse of what it made has '~'
+    [DataRow("https://пример.рф/%d0%b6ж?q=%41 б%")]
+    [DataRow("/%z%2E%2e.%F0%9F%0A:@")]
+    [DataRow("../%7E/ä?id=%2f&b=%4")]
+    public void UniqueKey_OfTheParsedUrl_IsTheKeyOfTheUrl(string link) => AssertKeysAgree(link);
+
+    [TestMethod]
+    public void UniqueKey_OfTheParsedUrl_IsTheKeyOfTheUrl_ForRandomLinks()
+    {
+        string[] starts = ["https://s.test/", "HTTP://S.Test:80/", "https://пример.рф/", "//cdn.test/", "/", "../", ""];
+        string[] pieces = ["a", "Z", "-", ".", "..", "/", "~", "%7e", "%7E", "%41", "%2e", "%2F", "%2f", "%d0%b6", "%D0%B6", "%", "%4", "%zz",
+                           " ", "\"", "{", "|", "\\", "ж", "例", "😀", " ", "?", "#", "&", "=", "+", "a=1", "&b=2"];
+        var random = new Random(7);
+        for (var i = 0; i < 20_000; i++)
+        {
+            var link = starts[random.Next(starts.Length)];
+            for (int j = 0, n = random.Next(1, 12); j < n; j++) link += pieces[random.Next(pieces.Length)];
+            AssertKeysAgree(link);
+        }
+    }
+
+    [TestMethod]
+    public async Task Enqueue_AStartUrlItsParseEscaped_IsOnePageWithTheLinkToIt()
+    {
+        // the parse of the start URL escapes its broken '%' and keeps %7e as it is; its key has '~', as the link to the page has it
+        var loads = new ConcurrentQueue<string>();
+        var loader = new DelegateLoader((r, _) =>
+        {
+            loads.Enqueue(r.Url);
+            return Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html("x")));
+        });
+        var scraper = new Scraper(loader, ScraperTests.FastOptions()).Route("default", ctx =>
+        {
+            if (ctx.Request.Depth == 0) ctx.Enqueue("/50%25/~");
+        });
+
+        var result = await scraper.RunToListAsync("https://s.test/50%/%7e");
+
+        Assert.HasCount(1, loads, string.Join(", ", loads));
+        Assert.AreEqual(1, result.Stats.Duplicates);
+    }
+
+    /// <summary>
+    /// The key of the Uri that Enqueue parsed is the key of its URL parsed again: for a start URL, parsed as it was given, and for a link
+    /// found on a page, which the context resolves and Enqueue parses once more.
+    /// </summary>
+    private static void AssertKeysAgree(string link)
+    {
+        if (UrlHelper.TryNormalizeUri(link, out var start)) Agree(start);
+        if (UrlHelper.TryResolve(Base, link, out var found) && UrlHelper.TryNormalizeUri(found, out var uri)) Agree(uri);
+
+        void Agree(Uri parsed)
+        {
+            var request = new ScrapeRequest(parsed.AbsoluteUri);
+            Assert.AreEqual(request.GetUniqueKey(), request.GetUniqueKey(parsed), $"link \"{link}\"");
+        }
     }
 
     [TestMethod]
