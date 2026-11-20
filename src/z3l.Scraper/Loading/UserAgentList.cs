@@ -8,13 +8,11 @@ namespace z3l.Scraper.Loading;
 /// <param name="UserAgent">The user agent.</param>
 /// <param name="Loads">Loads made with it.</param>
 /// <param name="Successes">Loads that got an answer.</param>
-/// <param name="Failures">Loads without an answer (no connection, a timeout...).</param>
 /// <param name="Blocks">Answers that sites blocked.</param>
-/// <param name="Dead">Resting after failures in a row.</param>
 /// <param name="BlockedSites">Sites it rests for now (blocked, or bad responses in a row).</param>
 /// <param name="BadResponses">Answers that were not the page.</param>
 /// <param name="Sessions">Sessions of loaders that use it now.</param>
-public sealed record UserAgentStatus(string UserAgent, long Loads, long Successes, long Failures, long Blocks, bool Dead, int BlockedSites,
+public sealed record UserAgentStatus(string UserAgent, long Loads, long Successes, long Blocks, int BlockedSites,
     long BadResponses, int Sessions);
 
 /// <summary>
@@ -22,9 +20,10 @@ public sealed record UserAgentStatus(string UserAgent, long Loads, long Successe
 /// (read again every refresh interval). One user agent per line; empty lines and lines starting with '#' are skipped.
 /// <para>
 /// A loader built on <see cref="BlockAwarePageLoader"/> gives every session (<see cref="LoaderSession"/>) one user agent, and tells the
-/// list how its loads went, as it tells the proxy list: a user agent whose session a site blocked rests for that site as
-/// <see cref="BlockPolicy"/> says, bad responses in a row rest it for the site, failures in a row for every site, and one failure or bad
-/// response puts it after the clean ones for a while. When every user agent rests for a site, a new session takes the one that comes
+/// list what the sites said, as it tells the proxy list: a user agent whose session a site blocked rests for that site as
+/// <see cref="BlockPolicy"/> says, bad responses in a row rest it for the site, and one bad response puts it after the clean ones for
+/// that site for a while. Failures without an answer (no connection, a timeout, 407) are the proxy's, not the user agent's: they are not
+/// counted here. When every user agent rests for a site, a new session takes the one that comes
 /// back first (a load never waits for a user agent). Thread-safe.
 /// </para>
 /// </summary>
@@ -112,12 +111,6 @@ public sealed class UserAgentList
     /// <summary>What happens to a user agent whose session a site blocked: it rests for that site. An hour by default.</summary>
     public ProxyBlockPolicy BlockPolicy { get; init; } = ProxyBlockPolicy.Block1Hour;
 
-    /// <summary>Failures in a row (no answer) after which a user agent rests for every site.</summary>
-    public int MaxConsecutiveFailures { get; init; } = 3;
-
-    /// <summary>How long a user agent with failures in a row rests, and how long one failure puts it after the clean ones.</summary>
-    public TimeSpan FailurePause { get; init; } = TimeSpan.FromMinutes(10);
-
     /// <summary>Bad responses in a row on a site after which a user agent rests for that site.</summary>
     public int MaxConsecutiveBadResponses { get; init; } = 3;
 
@@ -130,7 +123,8 @@ public sealed class UserAgentList
     /// <summary>Time source; tests set a manual one before the first call.</summary>
     internal TimeProvider Clock { get; set; } = TimeProvider.System;
 
-    private RestRules Rules => new(BlockPolicy, MaxConsecutiveFailures, FailurePause, MaxConsecutiveBadResponses, BadResponsePause);
+    /// <summary>The rules of the proxies, without failures: a user agent is not told of them.</summary>
+    private RestRules Rules => new(BlockPolicy, int.MaxValue, TimeSpan.Zero, MaxConsecutiveBadResponses, BadResponsePause);
 
     /// <summary>Number of user agents.</summary>
     public int Count
@@ -157,8 +151,8 @@ public sealed class UserAgentList
         lock (_lock)
         {
             var now = Clock.GetUtcNow();
-            return [.. _entries.Select(e => new UserAgentStatus(e.UserAgent, e.Health.Loads, e.Health.Successes, e.Health.Failures, e.Health.Blocks,
-                e.Health.DeadUntil > now, e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
+            return [.. _entries.Select(e => new UserAgentStatus(e.UserAgent, e.Health.Loads, e.Health.Successes, e.Health.Blocks,
+                e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
         }
     }
 
@@ -166,8 +160,8 @@ public sealed class UserAgentList
     public override string ToString()
     {
         var status = Status();
-        return $"{status.Count} user agents: {status.Count(s => s.Dead)} resting after failures, {status.Count(s => s.BlockedSites > 0)} resting for some site, " +
-               $"{status.Count(s => s.Sessions > 0)} in sessions; {status.Sum(s => s.Loads)} loads, {status.Sum(s => s.Failures)} failures, " +
+        return $"{status.Count} user agents: {status.Count(s => s.BlockedSites > 0)} resting for some site, " +
+               $"{status.Count(s => s.Sessions > 0)} in sessions; {status.Sum(s => s.Loads)} loads, " +
                $"{status.Sum(s => s.Blocks)} blocks, {status.Sum(s => s.BadResponses)} bad responses";
     }
 
@@ -230,15 +224,6 @@ public sealed class UserAgentList
         CountResult("success");
     }
 
-    /// <summary>A load with the user agent got no answer: as <see cref="ProxyList.ReportFailure"/>.</summary>
-    internal void ReportFailure(Entry entry, string reason)
-    {
-        CountResult("failure");
-        bool rests;
-        lock (_lock) rests = entry.Health.Failure(Clock.GetUtcNow(), Rules);
-        if (rests) _logger.LogInformation("User agent {UserAgent} failed {Count} times in a row ({Reason}): it rests {Pause}", entry.UserAgent, MaxConsecutiveFailures, reason, FailurePause);
-    }
-
     /// <summary>A site blocked a session with the user agent: it rests for that site as <see cref="BlockPolicy"/> says.</summary>
     internal void ReportBlocked(Entry entry, string site)
     {
@@ -267,17 +252,14 @@ public sealed class UserAgentList
         lock (_lock) entry.Health.GoodResponse(site);
     }
 
-    /// <summary>A failure, a block or a bad response the session survived: counted, without a rest.</summary>
+    /// <summary>A block or a bad response the session survived: counted, without a rest. A failure is not the user agent's.</summary>
     internal void CountForgiven(Entry entry, SessionFailure failure)
     {
+        if (failure == SessionFailure.Failure) return;
         lock (_lock)
         {
-            switch (failure)
-            {
-                case SessionFailure.Failure: entry.Health.Failures++; break;
-                case SessionFailure.Blocked: entry.Health.Blocks++; break;
-                default: entry.Health.BadResponses++; break;
-            }
+            if (failure == SessionFailure.Blocked) entry.Health.Blocks++;
+            else entry.Health.BadResponses++;
         }
         CountResult(ProxyList.ResultOf(failure));
     }

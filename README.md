@@ -401,10 +401,10 @@ One user agent per line, `#` for comments; the file is read again when it change
 as it keeps its cookies, with proxies or without them: the user agent changes only with a new session. A `User-Agent` in
 `DefaultHeaders` or in the request still wins.
 
-User agents rest as proxies do, for the sessions thrown away with them: a block rests the user agent for that site as
-`BlockPolicy` says (an hour by default), `MaxConsecutiveBadResponses` (3) bad responses in a row on a site rest it there for
-`BadResponsePause` (10 min), `MaxConsecutiveFailures` (3) failures in a row for every site for `FailurePause` (10 min), and
-one failure or bad response puts it after the clean ones for a while. When every user agent rests for a site, a new session
+User agents rest for what the sites said, for the sessions thrown away with them: a block rests the user agent for that
+site as `BlockPolicy` says (an hour by default), `MaxConsecutiveBadResponses` (3) bad responses in a row on a site rest it
+there for `BadResponsePause` (10 min), and one bad response puts it after the clean ones for that site for a while. A
+failure without an answer (no connection, a timeout, 407) is the proxy's only: the site never saw the user agent. When every user agent rests for a site, a new session
 takes the one that comes back first: a load never waits for a user agent. `agents.Status()` and `agents.ToString()` show
 what each one did; with `PublishMetrics` they are counted in `z3l.scraper.user_agent.results` and observed by state in
 `z3l.scraper.user_agents`.

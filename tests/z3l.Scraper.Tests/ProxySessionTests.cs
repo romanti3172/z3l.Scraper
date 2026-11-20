@@ -415,13 +415,26 @@ public sealed class ProxySessionTests
     }
 
     [TestMethod]
-    public async Task FirstLoadFails_TheSessionIsThrownAway()
+    public async Task FirstLoadFails_TheSessionIsThrownAway_TheFailureIsTheProxysNotTheUserAgents()
     {
-        var loader = new FakeSessionLoader(List(new ManualClock(), "a.test", "b.test"));
+        var clock = new ManualClock();
+        var agents = new UserAgentList(["UA-1"]) { Clock = clock };
+        var proxies = List(clock, "a.test", "b.test");
+        var loader = new FakeSessionLoader(proxies, agents);
 
-        await FailAsync(loader, 1);
+        loader.Behaviour["a.test"] = Proxy.Refuses;                          // no answers at all, through every proxy
+        loader.Behaviour["b.test"] = Proxy.Refuses;
+        for (var i = 1; i <= 6; i++)
+        {
+            await Assert.ThrowsExactlyAsync<HttpRequestException>(() => loader.LoadAsync(Page(i), CancellationToken.None));
+        }
 
-        Assert.HasCount(1, loader.Closed);
+        Assert.HasCount(6, loader.Closed);
+        Assert.IsTrue(proxies.Status().All(s => s.Dead), "the proxies rest after three failures in a row");
+        var agent = agents.Status().Single();
+        Assert.AreEqual(0, agent.BlockedSites, "the site never saw the user agent: it does not rest");
+        Assert.AreEqual(0, agent.Blocks + agent.BadResponses);
+        StringAssert.Contains(agents.ToString(), "0 resting for some site");
     }
 
     [TestMethod]

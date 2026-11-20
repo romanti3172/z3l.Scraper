@@ -367,7 +367,8 @@ public abstract class BlockAwarePageLoader : IBlockAwarePageLoader, IPublishesMe
 
     /// <summary>
     /// Tells the proxy and the user agent of the session what happened: as a failure, a block or a bad response that rests them when the
-    /// session is thrown away, as a count only when it is forgiven.
+    /// session is thrown away, as a count only when it is forgiven. A failure (no answer) is the proxy's only: the site never saw the user
+    /// agent.
     /// </summary>
     private void Tell(LoaderSession session, SessionFailure failure, string site, string reason, bool discarded)
     {
@@ -390,7 +391,6 @@ public abstract class BlockAwarePageLoader : IBlockAwarePageLoader, IPublishesMe
         {
             switch (failure)
             {
-                case SessionFailure.Failure: UserAgents!.ReportFailure(agent, reason); break;
                 case SessionFailure.Blocked when site.Length > 0: UserAgents!.ReportBlocked(agent, site); break;
                 case SessionFailure.BadResponse when site.Length > 0: UserAgents!.ReportBadResponse(agent, site, reason); break;
             }
