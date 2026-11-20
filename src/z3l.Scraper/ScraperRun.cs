@@ -583,6 +583,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         using var attempt = _traces?.StartAttempt(request, uri, fromCache);
 
         PageResponse? response = cached;
+        PageResponse? loaded = null;       // the loader's own response, which it hears the end of
         var inHandlerSlot = false;
         try
         {
@@ -615,6 +616,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     {
                         response = await loader.LoadAsync(request, timeout.Token).ConfigureAwait(false)
                                    ?? throw new InvalidOperationException($"{loader.GetType().Name}.LoadAsync returned null");
+                        loaded = response;
                     }
                     finally
                     {
@@ -684,6 +686,12 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     // and the page must not wait in memory for a slow consumer
                     response!.ReleaseText();
                     response = null;
+                    if (loaded != null)
+                    {
+                        // the loader is done with it before the items wait for a slow consumer, and the page is not kept for them
+                        ReportDone(loader, request, loaded);
+                        loaded = null;
+                    }
                     if (handled) await DeliverAsync(request, host, items, token).ConfigureAwait(false);
                     break;
 
@@ -723,6 +731,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         {
             response?.ReleaseText();    // a page that is retried, failed or abandoned
             if (inHandlerSlot) _handlerSlots!.Release();
+            if (loaded != null) ReportDone(loader, request, loaded);
         }
     }
 
@@ -889,6 +898,13 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         if (loader is not IBlockAwarePageLoader blockAware) return;
         try { blockAware.ReportGoodResponse(request, response); }
         catch (Exception ex) { Logger.LogError(ex, "ReportGoodResponse threw"); }
+    }
+
+    private void ReportDone(IPageLoader loader, ScrapeRequest request, PageResponse response)
+    {
+        if (loader is not IBlockAwarePageLoader blockAware) return;
+        try { blockAware.ReportDone(request, response); }
+        catch (Exception ex) { Logger.LogError(ex, "ReportDone threw"); }
     }
 
     // ---------------------------------------------------------------- cache and snapshots
