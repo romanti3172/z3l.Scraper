@@ -840,17 +840,21 @@ public sealed class ProxyTests
         Assert.IsEmpty(second.Requests);
 
         first.Status = 403;
-        await Load(4, blocked: true);                   // the session is thrown away, first rests 10 minutes for the site
-        await Load(5);
+        await Load(4, blocked: true);                   // forgiven: the session had good answers
+        Assert.AreEqual("visit=3", first.Cookies.Last());
+        await Load(5, blocked: true);                   // the second in a row: thrown away, first rests 10 minutes for the site
+        Assert.AreEqual("visit=4", first.Cookies.Last());
         await Load(6);
+        await Load(7);
         CollectionAssert.AreEqual(new[] { "UA-2", "UA-2" }, second.UserAgents.ToArray());
         CollectionAssert.AreEqual(new[] { "", "visit=1" }, second.Cookies.ToArray(), "a new session starts with an empty cookie jar");
 
         first.Status = 200;
         second.Status = 403;
         clock.Now = clock.Now.AddMinutes(11);
-        await Load(7, blocked: true);
-        await Load(8);
+        await Load(8, blocked: true);
+        await Load(9, blocked: true);
+        await Load(10);
         Assert.AreEqual("UA-3", first.UserAgents.Last(), "back from its rest with a new user agent");
         Assert.AreEqual("", first.Cookies.Last(), "and without the cookies of the session the site blocked");
         Assert.AreEqual(1, proxies.Status().Sum(s => s.Sessions));
@@ -858,16 +862,27 @@ public sealed class ProxyTests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task Loader_WithoutProxies_RotatesUserAgents_TheRequestHeaderWins()
+    public async Task Loader_WithoutProxies_ASessionKeepsItsUserAgentAndCookies_TheRequestHeaderWins()
     {
         await using var site = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
         using var loader = new HttpPageLoader(new HttpPageLoaderOptions { UserAgents = new UserAgentList(["UA-1", "UA-2"]) });
 
-        await loader.LoadAsync(site.Address + "/1", CancellationToken.None);
-        await loader.LoadAsync(site.Address + "/2", CancellationToken.None);
-        await loader.LoadAsync(new ScrapeRequest(site.Address + "/3") { Headers = new Dictionary<string, string> { ["User-Agent"] = "Mine" } }, CancellationToken.None);
+        async Task Load(ScrapeRequest request, bool blocked = false)
+        {
+            var response = await loader.LoadAsync(request, CancellationToken.None);
+            if (blocked) loader.ReportBlocked(request, response, "captcha");
+            else loader.ReportGoodResponse(request, response);
+        }
 
-        CollectionAssert.AreEqual(new[] { "UA-1", "UA-2", "Mine" }, site.UserAgents.ToArray());
+        await Load(site.Address + "/1");
+        await Load(site.Address + "/2");
+        await Load(new ScrapeRequest(site.Address + "/3") { Headers = new Dictionary<string, string> { ["User-Agent"] = "Mine" } });
+        await Load(site.Address + "/4", blocked: true);
+        await Load(site.Address + "/5", blocked: true);       // the second in a row: a new session
+        await Load(site.Address + "/6");
+
+        CollectionAssert.AreEqual(new[] { "UA-1", "UA-1", "Mine", "UA-1", "UA-1", "UA-2" }, site.UserAgents.ToArray());
+        CollectionAssert.AreEqual(new[] { "", "visit=1", "visit=2", "visit=3", "visit=4", "" }, site.Cookies.ToArray());
     }
 
     // ------------------------------------------------------------------ lists from a URL

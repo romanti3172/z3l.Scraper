@@ -16,9 +16,9 @@ rotating proxies, rate and time limits, and streaming results while the scraping
   A handler can ask for a retry (`RetryRequestException`) or give up at once (`NonRetryableException`).
 - **Whole pages or nothing.** Items a handler emits reach you when it finishes; if it throws, they are dropped,
   so a retried page never gives duplicates.
-- **Proxies.** A proxy list from a text file, a URL or an API (http, https, socks4, socks5, with logins). Pages go through
-  sessions: a proxy, a user agent and a client with its cookies, kept while they do well and thrown away whole on a
-  failure or a block; a proxy a site blocks rests for that site, a failing one rests for all.
+- **Sessions and proxies.** Pages go through sessions: a client with its cookies, a user agent and a proxy, kept while they
+  do well and thrown away whole after failures or blocks. Proxies from a text file, a URL or an API (http, https, socks4,
+  socks5, with logins); a proxy or a user agent a site blocks rests for that site, a failing one rests for all.
 - **Politeness and limits.** A host that answers 429 / 503 or blocks is slowed down by itself while other hosts keep
   full speed; robots.txt and its Crawl-delay on request; `MaxConcurrencyPerHost` and `HostDelay` for each host, and a
   big site at its limit does not hold back the others; `MaxConcurrency`, `MaxRequestsPerMinute`, `MaxRequests`,
@@ -332,21 +332,28 @@ listeners: as with an http proxy, someone in the middle could pose as the proxy 
 What proxy sellers call an "HTTPS proxy" is usually a plain http proxy that tunnels https pages with CONNECT: write it as
 `http://`. An http proxy that cannot CONNECT loads http pages only.
 
-Pages are loaded in sessions. A session is one proxy, one user agent and one HttpClient with its own connections and
-cookies, and it serves one load at a time. A session whose page was good serves the next load with the same proxy,
-user agent and cookies, and free sessions go before any new proxy. A failure (no connection, a timeout, 407), a block or a
-bad response (the proxy answered, but not with the page: its own page, a cut-off one, the page fails `MustContain`, the
-format or another check, comes with a 5xx, or the handler throws `RetryRequestException`) throws the session away whole:
-its client goes with its cookies, the proxy rests as below, and the next load opens a new session on another proxy, with
-the next user agent and an empty cookie jar. Cookies and a user agent never move to another proxy, and a proxy back from
-its rest starts with a new session. A 404, a 429 or a 503 is the site's answer, not the session's fault: the session goes
-on. There are as many sessions as loads at once (`MaxConcurrency`); a new session takes a proxy no other session uses, the
-next in turn, and shares one only when every free proxy rests (a rotating gateway behind one address is fine).
+Pages are loaded in sessions, with proxies or without them. A session is one HttpClient with its own connections and
+cookies, one user agent and, with a proxy list, one proxy: the user agent and the proxy are taken apart, each by the rules
+of its list, and stay together while the session lives. A session serves one load at a time, and a session whose page was
+good serves the next load with the same client, cookies, user agent and proxy; free sessions go before new ones. There are
+as many sessions as loads at once (`MaxConcurrency`).
 
-When a site blocks an answer, the proxy that loaded it rests for that site only, as `ProxyBlockPolicy` says: `Ignore`,
+A failure (no connection, a timeout, 407), a block or a bad response (the proxy answered, but not with the page: its own
+page, a cut-off one, the page fails `MustContain`, the format or another check, comes with a 5xx, or the handler throws
+`RetryRequestException`) counts against the session. A session without a good page yet is thrown away at its first one; a
+session that has had one (`SessionTrustedAfter`, 1) is forgiven one and thrown away at the second in a row
+(`SessionMaxFailuresInARow`, 2), and a good page starts the count again. A forgiven one is counted for the proxy and the
+user agent, without a rest. A session thrown away takes everything along: its client goes with its cookies, its proxy and
+its user agent rest as their lists say, and the next load opens a new session with a new client, user agent and proxy.
+Cookies and a user agent never move to another session, and a proxy or a user agent back from its rest starts in a new one.
+A 404, a 429 or a 503 is the site's answer, not the session's fault: the session goes on. A new session takes a proxy no
+other session uses, the next in turn, and shares one only when every free proxy rests (a rotating gateway behind one
+address is fine).
+
+When a session is thrown away for a block, its proxy rests for that site only, as `ProxyBlockPolicy` says: `Ignore`,
 `Block10Minutes`, `Block1Hour` (the default), `Block1Day` or `Remove`.
 
-A failure or a bad response puts the proxy after the clean ones: a new session takes it only when no clean proxy is free.
+A failure or a bad response of a session thrown away puts its proxy after the clean ones: a new session takes it only when no clean proxy is free.
 After
 `MaxConsecutiveFailures` (3) failures in a row a proxy rests for every site for `DeadProxyPause` (10 min); after
 `MaxConsecutiveBadResponses` (3) bad responses in a row on a site it rests for that site for `BadResponsePause` (10 min).
@@ -357,7 +364,7 @@ no longer than `RequestTimeout`. The file is read again when it changes; proxies
 
 The scraper tells the loader what each answer was after its checks and the handler, and the session waits for that before
 it serves another load. Code that calls `loader.LoadAsync` itself tells it too: `ReportGoodResponse` or `ReportDone` keeps
-the session, `ReportBlocked` or `ReportBadResponse` throws it away (an answer nobody reports frees its session after
+the session, `ReportBlocked` or `ReportBadResponse` count against it (an answer nobody reports frees its session after
 2 minutes).
 
 The list can also come from a proxy service: the URL answers with the same lines or with a JSON array of them, and is read
@@ -390,9 +397,21 @@ using var loader = new HttpPageLoader(new HttpPageLoaderOptions
 });
 ```
 
-One user agent per line, `#` for comments; the file is read again when it changes. With proxies every session takes the
-next user agent and keeps it, as it keeps its cookies, so a site sees one browser per address, and a new session is a new
-browser; without proxies every request takes the next one. A `User-Agent` in `DefaultHeaders` or in the request still wins.
+One user agent per line, `#` for comments; the file is read again when it changes. Every session takes one and keeps it,
+as it keeps its cookies, with proxies or without them: the user agent changes only with a new session. A `User-Agent` in
+`DefaultHeaders` or in the request still wins.
+
+User agents rest as proxies do, for the sessions thrown away with them: a block rests the user agent for that site as
+`BlockPolicy` says (an hour by default), `MaxConsecutiveBadResponses` (3) bad responses in a row on a site rest it there for
+`BadResponsePause` (10 min), `MaxConsecutiveFailures` (3) failures in a row for every site for `FailurePause` (10 min), and
+one failure or bad response puts it after the clean ones for a while. When every user agent rests for a site, a new session
+takes the one that comes back first: a load never waits for a user agent. `agents.Status()` and `agents.ToString()` show
+what each one did; with `PublishMetrics` they are counted in `z3l.scraper.user_agent.results` and observed by state in
+`z3l.scraper.user_agents`.
+
+```csharp
+var agents = new UserAgentList(File.ReadLines("useragents.txt")) { BlockPolicy = ProxyBlockPolicy.Block10Minutes, BadResponsePause = TimeSpan.FromMinutes(30) };
+```
 
 ## Throttling
 
@@ -603,7 +622,7 @@ using var loader = new HttpPageLoader(new HttpPageLoaderOptions
 using var loader = new StealthHttpPageLoader(new StealthHttpPageLoaderOptions
 {
     Proxies = ProxyList.FromFile("proxies.txt"),
-    UserAgents = UserAgentList.FromFile("useragents.txt"), // one per proxy session; Chrome, Edge, Firefox and Safari get their own headers
+    UserAgents = UserAgentList.FromFile("useragents.txt"), // one per session; Chrome, Edge, Firefox and Safari get their own headers
     AcceptLanguage = "de-DE,de;q=0.9",
 });
 
@@ -635,7 +654,7 @@ anti-bot that reads JA3/JA4 tells from a browser's: for such sites use a browser
 
 ```
 local loaders (IPageLoader): the scraper's MaxConcurrency and RequestTimeout
-BlockAwarePageLoader            proxy sessions (a proxy, a user agent, a client), Report… to ProxyList
+BlockAwarePageLoader            sessions (a client, a user agent, a proxy), Report… to ProxyList
  └─ HttpClientPageLoader        HttpClient per session with its cookies, CreateHandler, CreateMessage, the body limit
      ├─ HttpPageLoader          the request as it is
      └─ StealthHttpPageLoader   the way a browser asks
@@ -650,15 +669,15 @@ QueuePageLoader                 the loads that wait for answers, Paused, lost lo
 // a loader of anything (a browser, curl...): BlockAwarePageLoader keeps the sessions and tells the list how they did
 public sealed class CurlLoader(ProxyList proxies) : BlockAwarePageLoader(proxies, userAgents: null, userAgent: "Mozilla/5.0 ...")
 {
-    protected override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, ProxySession? session,
+    protected override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, LoaderSession session,
         string? userAgent, CancellationToken cancellationToken)
     {
-        var curl = (CurlSession)(session!.State ??= new CurlSession(session.Proxy.Address));   // made on the session's first load
+        var curl = (CurlSession)(session.State ??= new CurlSession(session.Proxy?.Address));   // made on the session's first load
         var html = await curl.GetAsync(uri, userAgent, cancellationToken);
         return PageResponse.FromText(200, finalUrl, html);
     }
 
-    protected override void CloseSession(ProxySession session) => (session.State as CurlSession)?.Dispose();
+    protected override void CloseSession(LoaderSession session) => (session.State as CurlSession)?.Dispose();
 }
 
 // HttpClient with a handler of your own: Polly, logging, signed requests, a TLS library, another outgoing address
@@ -671,7 +690,7 @@ public sealed class RetryingLoader(StealthHttpPageLoaderOptions options) : Steal
 `BlockAwarePageLoader` hears from the scraper which responses were blocked (`ReportBlocked`), which were not the page
 (they failed the checks, a 5xx, the handler asked for a retry: `ReportBadResponse`), which were (`ReportGoodResponse`) and
 which loads ran out of `RequestTimeout` (`ReportTimeout`), and when the scraper is done with an answer (`ReportDone`); it
-passes that on to the proxy and keeps or throws away the session that loaded them. A loader can also implement `IPageLoader` or `IBlockAwarePageLoader` itself and rotate
+passes that on to the proxy and the user agent and keeps or throws away the session that loaded them. A loader can also implement `IPageLoader` or `IBlockAwarePageLoader` itself and rotate
 proxies with `ProxyList`: `AcquireAsync(host)` gives the next proxy that may load from the site, and `ReportSuccess`,
 `ReportFailure`, `ReportBlocked`, `ReportBadResponse` and `ReportGoodResponse` tell the list how it went.
 

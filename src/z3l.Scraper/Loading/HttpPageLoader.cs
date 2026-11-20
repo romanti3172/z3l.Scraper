@@ -15,7 +15,7 @@ public sealed class HttpPageLoaderOptions : HttpClientPageLoaderOptions
 }
 
 /// <summary>
-/// Loads pages with <see cref="HttpClient"/>, directly or through proxy sessions (<see cref="ProxySession"/>), sending the request as it is: HTTP/1.1, the default
+/// Loads pages with <see cref="HttpClient"/> in sessions (<see cref="LoaderSession"/>), directly or through proxies, sending the request as it is: HTTP/1.1, the default
 /// headers, the headers of the request and the user agent. Thread-safe; dispose it when the scraping is over.
 /// <see cref="StealthHttpPageLoader"/> asks for pages the way a browser does.
 /// </summary>

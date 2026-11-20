@@ -277,14 +277,16 @@ public sealed class ProxyList
         get { lock (_lock) return _entries.Count; }
     }
 
+    private RestRules Rules => new(BlockPolicy, MaxConsecutiveFailures, DeadProxyPause, MaxConsecutiveBadResponses, BadResponsePause);
+
     /// <summary>State of every proxy.</summary>
     public IReadOnlyList<ProxyStatus> Status()
     {
         lock (_lock)
         {
             var now = Clock.GetUtcNow();
-            return [.. _entries.Select(e => new ProxyStatus(e.Address, e.Loads, e.Successes, e.Failures, e.Blocks, e.DeadUntil > now, e.CountBlockedSites(now),
-                e.BadResponses, e.Sessions))];
+            return [.. _entries.Select(e => new ProxyStatus(e.Address, e.Health.Loads, e.Health.Successes, e.Health.Failures, e.Health.Blocks,
+                e.Health.DeadUntil > now, e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
         }
     }
 
@@ -324,24 +326,18 @@ public sealed class ProxyList
             {
                 ReloadIfChanged();
                 var now = Clock.GetUtcNow();
-                var count = _entries.Count;
-                // clean and free first; then clean with sessions on it (fewest first), pessimized and free, pessimized with sessions
-                int best = -1, bestRank = int.MaxValue, bestSessions = int.MaxValue;
-                for (var i = 0; i < count; i++)
+                var index = Health.Pick(_entries, e => e.Health, _cursor, site, now, Rules);
+                if (index >= 0)
                 {
-                    var index = (_cursor + i) % count;
                     var entry = _entries[index];
-                    if (entry.DeadUntil > now || entry.BlockedUntil(site) > now) continue;
-                    var rank = (IsPessimized(entry, site, now) ? 2 : 0) + (entry.Sessions > 0 ? 1 : 0);
-                    if (rank == 0) return Take(index);
-                    if (rank < bestRank || (rank == bestRank && entry.Sessions < bestSessions))
-                    {
-                        (best, bestRank, bestSessions) = (index, rank, entry.Sessions);
-                    }
+                    _cursor = (index + 1) % _entries.Count;
+                    entry.Health.Loads++;
+                    if (session) entry.Health.Sessions++;
+                    _waitLogged.Remove(site);
+                    return entry;
                 }
-                if (best >= 0) return Take(best);
 
-                var next = _entries.Select(e => e.DeadUntil > e.BlockedUntil(site) ? e.DeadUntil : e.BlockedUntil(site)).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
+                var next = _entries.Select(e => e.Health.BackAt(site)).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
                 if (next == DateTimeOffset.MaxValue)
                 {
                     throw new NonRetryableException($"Every proxy is removed for {site} (ProxyBlockPolicy.Remove)");
@@ -354,16 +350,6 @@ public sealed class ProxyList
             }
             await Task.Delay(wait > TimeSpan.FromMilliseconds(10) ? wait : TimeSpan.FromMilliseconds(10), Clock, cancellationToken).ConfigureAwait(false);
         }
-
-        Entry Take(int index)
-        {
-            var entry = _entries[index];
-            _cursor = (index + 1) % _entries.Count;
-            entry.Loads++;
-            if (session) entry.Sessions++;
-            _waitLogged.Remove(site);
-            return entry;
-        }
     }
 
     /// <summary>
@@ -375,15 +361,20 @@ public sealed class ProxyList
         lock (_lock)
         {
             ReloadIfChanged();
-            var now = Clock.GetUtcNow();
-            return entry.Listed && entry.DeadUntil <= now && entry.BlockedUntil(site) <= now;
+            return entry.Health.Listed && !entry.Health.Rests(site, Clock.GetUtcNow());
         }
+    }
+
+    /// <summary>Whether the proxy is still in the list (a list read again may drop it).</summary>
+    internal bool IsListed(Entry entry)
+    {
+        lock (_lock) return entry.Health.Listed;
     }
 
     /// <summary>A session open on the proxy takes another load.</summary>
     internal void CountLoad(Entry entry)
     {
-        lock (_lock) entry.Loads++;
+        lock (_lock) entry.Health.Loads++;
     }
 
     /// <summary>A session that <see cref="AcquireForSessionAsync"/> opened on the proxy is closed.</summary>
@@ -391,38 +382,15 @@ public sealed class ProxyList
     {
         lock (_lock)
         {
-            if (entry.Sessions > 0) entry.Sessions--;
+            if (entry.Health.Sessions > 0) entry.Health.Sessions--;
         }
-    }
-
-    /// <summary>
-    /// A proxy with a failure or a bad response for the site not long ago: it goes after the clean ones. Successes don't put a
-    /// proxy ahead (the turn stays even, so no proxy gets more loads at once than the others); errors put it back.
-    /// </summary>
-    private bool IsPessimized(Entry entry, string site, DateTimeOffset now)
-    {
-        if (entry.FailuresInARow > 0)
-        {
-            if (now < entry.LastFailureAt + DeadProxyPause) return true;
-            entry.FailuresInARow = 0;           // long ago: a clean start
-        }
-        if (entry.BadResponsesInARow.TryGetValue(site, out var bad))
-        {
-            if (now < bad.At + BadResponsePause) return true;
-            entry.BadResponsesInARow.Remove(site);
-        }
-        return false;
     }
 
     /// <summary>The proxy gave an answer: its failures in a row start again.</summary>
     public void ReportSuccess(Entry entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        lock (_lock)
-        {
-            entry.Successes++;
-            entry.FailuresInARow = 0;
-        }
+        lock (_lock) entry.Health.Success();
         CountResult("success");
     }
 
@@ -434,36 +402,22 @@ public sealed class ProxyList
     {
         ArgumentNullException.ThrowIfNull(entry);
         CountResult("failure");
-        lock (_lock)
+        bool rests;
+        lock (_lock) rests = entry.Health.Failure(Clock.GetUtcNow(), Rules);
+        if (rests)
         {
-            entry.Failures++;
-            entry.LastFailureAt = Clock.GetUtcNow();
-            if (++entry.FailuresInARow < MaxConsecutiveFailures) return;
-            entry.FailuresInARow = 0;
-            entry.DeadUntil = Clock.GetUtcNow() + DeadProxyPause;
+            _logger.LogWarning("Proxy {Proxy} failed {Count} times in a row ({Reason}): it rests {Pause}", entry.Address, MaxConsecutiveFailures, reason, DeadProxyPause);
         }
-        _logger.LogWarning("Proxy {Proxy} failed {Count} times in a row ({Reason}): it rests {Pause}", entry.Address, MaxConsecutiveFailures, reason, DeadProxyPause);
     }
 
     /// <summary>A site blocked an answer of the proxy: it rests for that site as <see cref="BlockPolicy"/> says.</summary>
     public void ReportBlocked(Entry entry, string site)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        TimeSpan? rest = BlockPolicy switch
-        {
-            ProxyBlockPolicy.Block10Minutes => TimeSpan.FromMinutes(10),
-            ProxyBlockPolicy.Block1Hour => TimeSpan.FromHours(1),
-            ProxyBlockPolicy.Block1Day => TimeSpan.FromDays(1),
-            _ => null,
-        };
         CountResult("blocked");
-        lock (_lock)
-        {
-            entry.Blocks++;
-            if (BlockPolicy == ProxyBlockPolicy.Ignore) return;
-            entry.BlockedSites[site] = BlockPolicy == ProxyBlockPolicy.Remove ? DateTimeOffset.MaxValue : Clock.GetUtcNow() + rest!.Value;
-        }
-        _logger.LogInformation("Proxy {Proxy} is blocked on {Site}: {Policy}", entry.Address, site, BlockPolicy);
+        bool rests;
+        lock (_lock) rests = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
+        if (rests) _logger.LogInformation("Proxy {Proxy} is blocked on {Site}: {Policy}", entry.Address, site, BlockPolicy);
     }
 
     /// <summary>
@@ -476,22 +430,13 @@ public sealed class ProxyList
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(site);
         CountResult("bad_response");
-        lock (_lock)
+        bool rests;
+        lock (_lock) rests = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
+        if (rests)
         {
-            entry.BadResponses++;
-            var now = Clock.GetUtcNow();
-            var inARow = (entry.BadResponsesInARow.TryGetValue(site, out var bad) && now < bad.At + BadResponsePause ? bad.Count : 0) + 1;
-            if (inARow < MaxConsecutiveBadResponses)
-            {
-                entry.BadResponsesInARow[site] = (inARow, now);
-                return;
-            }
-            entry.BadResponsesInARow.Remove(site);
-            var until = now + BadResponsePause;
-            if (entry.BlockedUntil(site) < until) entry.BlockedSites[site] = until;     // a longer block stays
+            _logger.LogInformation("Proxy {Proxy} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
+                entry.Address, MaxConsecutiveBadResponses, site, reason, BadResponsePause);
         }
-        _logger.LogInformation("Proxy {Proxy} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
-            entry.Address, MaxConsecutiveBadResponses, site, reason, BadResponsePause);
     }
 
     /// <summary>The proxy gave the page of <paramref name="site"/>: its bad responses in a row for the site start again.</summary>
@@ -499,8 +444,33 @@ public sealed class ProxyList
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(site);
-        lock (_lock) entry.BadResponsesInARow.Remove(site);
+        lock (_lock) entry.Health.GoodResponse(site);
     }
+
+    /// <summary>
+    /// A load of a session failed, was blocked or was not the page, but the session goes on (it did well before): the proxy counts it,
+    /// without a rest or a place after the clean proxies.
+    /// </summary>
+    internal void CountForgiven(Entry entry, SessionFailure failure)
+    {
+        lock (_lock)
+        {
+            switch (failure)
+            {
+                case SessionFailure.Failure: entry.Health.Failures++; break;
+                case SessionFailure.Blocked: entry.Health.Blocks++; break;
+                default: entry.Health.BadResponses++; break;
+            }
+        }
+        CountResult(ResultOf(failure));
+    }
+
+    internal static string ResultOf(SessionFailure failure) => failure switch
+    {
+        SessionFailure.Failure => "failure",
+        SessionFailure.Blocked => "blocked",
+        _ => "bad_response",
+    };
 
     // ---------------------------------------------------------------- metrics
 
@@ -532,7 +502,7 @@ public sealed class ProxyList
             _logger.LogWarning("{Source} has no proxies now: the old list stays", _source.Name);
             return;
         }
-        foreach (var gone in _entries.Except(entries)) gone.Listed = false;
+        foreach (var gone in _entries.Except(entries)) gone.Health.Listed = false;
         _entries = entries;
         _cursor = 0;
         _logger.LogInformation("Proxy list {Source} read again: {Count} proxies", _source.Name, entries.Count);
@@ -560,16 +530,7 @@ public sealed class ProxyList
         /// <summary>The proxy.</summary>
         public ProxyAddress Address { get; }
 
-        internal Dictionary<string, DateTimeOffset> BlockedSites { get; } = new(StringComparer.OrdinalIgnoreCase);
-        internal Dictionary<string, (int Count, DateTimeOffset At)> BadResponsesInARow { get; } = new(StringComparer.OrdinalIgnoreCase);
-        internal DateTimeOffset DeadUntil, LastFailureAt;
-        internal int FailuresInARow, Sessions;
-        internal bool Listed = true;
-        internal long Loads, Successes, Failures, Blocks, BadResponses;
-
-        internal DateTimeOffset BlockedUntil(string site) => BlockedSites.TryGetValue(site, out var until) ? until : DateTimeOffset.MinValue;
-
-        internal int CountBlockedSites(DateTimeOffset now) => BlockedSites.Count(b => b.Value > now);
+        internal Health Health { get; } = new();
 
         /// <summary>The proxy, without its password.</summary>
         public override string ToString() => Address.ToString();

@@ -325,12 +325,17 @@ internal interface IPublishesMetrics
 internal sealed class LoaderInstruments
 {
     private readonly ConditionalWeakTable<ProxyList, object?> _proxyLists = new();
+    private readonly ConditionalWeakTable<UserAgentList, object?> _userAgentLists = new();
     private readonly ConditionalWeakTable<QueuePageLoader, object?> _queueLoaders = new();
 
     public LoaderInstruments(Meter meter)
     {
         ProxyResults = meter.CreateCounter<long>("z3l.scraper.proxy.results", "{load}",
             "Loads through proxies, by how they went: success, failure, blocked, bad_response.");
+        UserAgentResults = meter.CreateCounter<long>("z3l.scraper.user_agent.results", "{load}",
+            "Loads of proxy sessions by how they went for their user agent: success, failure, blocked, bad_response.");
+        meter.CreateObservableUpDownCounter("z3l.scraper.user_agents", ObserveUserAgents, "{user_agent}",
+            "User agents by state: alive, resting after failures, resting for some site.");
         RemoteSent = meter.CreateCounter<long>("z3l.scraper.remote.sent", "{load}", "Loads a remote loader sent.");
         RemoteResults = meter.CreateCounter<long>("z3l.scraper.remote.results", "{load}",
             "What came of the loads a remote loader sent: answered, failed, lost, late.");
@@ -341,11 +346,13 @@ internal sealed class LoaderInstruments
     }
 
     public Counter<long> ProxyResults { get; }
+    public Counter<long> UserAgentResults { get; }
     public Counter<long> RemoteSent { get; }
     public Counter<long> RemoteResults { get; }
     public Counter<double> Credits { get; }
 
     public void Add(ProxyList list) => _proxyLists.AddOrUpdate(list, null);
+    public void Add(UserAgentList list) => _userAgentLists.AddOrUpdate(list, null);
     public void Add(QueuePageLoader loader) => _queueLoaders.AddOrUpdate(loader, null);
 
     /// <summary>The proxies of every list that publishes metrics, added up by state.</summary>
@@ -358,6 +365,24 @@ internal sealed class LoaderInstruments
             {
                 if (proxy.Dead) resting++;
                 else if (proxy.BlockedSites > 0) restingForSite++;
+                else alive++;
+            }
+        }
+        yield return new Measurement<long>(alive, new KeyValuePair<string, object?>(ScraperTelemetry.StateTag, "alive"));
+        yield return new Measurement<long>(resting, new KeyValuePair<string, object?>(ScraperTelemetry.StateTag, "resting"));
+        yield return new Measurement<long>(restingForSite, new KeyValuePair<string, object?>(ScraperTelemetry.StateTag, "resting_for_site"));
+    }
+
+    /// <summary>The user agents of every list that publishes metrics, added up by state.</summary>
+    private IEnumerable<Measurement<long>> ObserveUserAgents()
+    {
+        long alive = 0, resting = 0, restingForSite = 0;
+        foreach (var (list, _) in _userAgentLists)
+        {
+            foreach (var agent in list.Status())
+            {
+                if (agent.Dead) resting++;
+                else if (agent.BlockedSites > 0) restingForSite++;
                 else alive++;
             }
         }

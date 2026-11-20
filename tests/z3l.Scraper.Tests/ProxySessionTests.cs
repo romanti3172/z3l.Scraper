@@ -5,8 +5,9 @@ using z3l.Scraper.Loading;
 namespace z3l.Scraper.Tests;
 
 /// <summary>
-/// Proxy sessions of <see cref="BlockAwarePageLoader"/>: a proxy, a user agent and a client with its cookies that go on while they do
-/// well and are thrown away whole on a failure, a block or a bad response. Fake proxies, a fake clock.
+/// Sessions of <see cref="BlockAwarePageLoader"/>: a client with its cookies, a user agent and a proxy (with a list) that go on while they
+/// do well and are thrown away whole after failures, blocks or bad responses: at the first for a session without a good answer, at the
+/// second in a row for one with. Fake proxies, a fake clock.
 /// </summary>
 [TestClass]
 public sealed class ProxySessionTests
@@ -30,9 +31,19 @@ public sealed class ProxySessionTests
     {
         private int _jars;
 
-        public FakeSessionLoader(ProxyList proxies, UserAgentList? userAgents = null)
-            : base(proxies, userAgents ?? new UserAgentList(Enumerable.Range(1, 50).Select(i => $"UA-{i}")), "UA")
+        public FakeSessionLoader(ProxyList? proxies, UserAgentList? userAgents = null, ManualClock? clock = null)
+            : base(proxies, userAgents ?? Agents(clock ?? (TimeProvider?)proxies?.Clock ?? TimeProvider.System), "UA")
         {
+        }
+
+        private static UserAgentList Agents(TimeProvider clock) => new(Enumerable.Range(1, 50).Select(i => $"UA-{i}")) { Clock = clock };
+
+        public UserAgentList AgentList => UserAgents!;
+
+        public void Tolerate(int trustedAfter, int maxInARow)
+        {
+            SessionTrustedAfter = trustedAfter;
+            SessionMaxFailuresInARow = maxInARow;
         }
 
         public Dictionary<string, Proxy> Behaviour { get; } = [];
@@ -41,18 +52,17 @@ public sealed class ProxySessionTests
         public TaskCompletionSource? Gate { get; set; }
 
         public ConcurrentQueue<(string Proxy, string? Agent, int Jar)> Loads { get; } = new();
-        public ConcurrentQueue<ProxySession> Closed { get; } = new();
+        public ConcurrentQueue<LoaderSession> Closed { get; } = new();
         public ConcurrentDictionary<string, ProxyList.Entry> Entries { get; } = new();
 
         public (string Proxy, string? Agent, int Jar) Last => Loads.Last();
 
-        protected override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, ProxySession? session, string? userAgent,
+        protected override async Task<PageResponse> LoadThroughAsync(ScrapeRequest request, Uri uri, LoaderSession session, string? userAgent,
             CancellationToken cancellationToken)
         {
-            Assert.IsNotNull(session);
             session.State ??= new Jar(Interlocked.Increment(ref _jars));
-            var host = session.Proxy.Address.Host;
-            Entries[host] = session.Proxy;
+            var host = session.Proxy?.Address.Host ?? "direct";
+            if (session.Proxy != null) Entries[host] = session.Proxy;
             Loads.Enqueue((host, userAgent, ((Jar)session.State).Number));
             if (Gate is { } gate) await gate.Task.WaitAsync(cancellationToken);
             if (request.Url.EndsWith("/missing", StringComparison.Ordinal)) return Page(404, "no such page");
@@ -70,7 +80,7 @@ public sealed class ProxySessionTests
                 new(status, request.Url, Encoding.UTF8.GetBytes($"<html><body>{text}</body></html>"), "text/html");
         }
 
-        protected override void CloseSession(ProxySession session) => Closed.Enqueue(session);
+        protected override void CloseSession(LoaderSession session) => Closed.Enqueue(session);
 
         public void Close() => CloseSessions();
     }
@@ -165,14 +175,14 @@ public sealed class ProxySessionTests
         await GoodAsync(loader, 2);
         await GoodAsync(loader, 3);
 
-        Assert.AreEqual("a.test", loader.Closed.Single().Proxy.Address.Host);
+        Assert.AreEqual("a.test", loader.Closed.Single().Proxy!.Address.Host);
         CollectionAssert.AreEqual(new[] { ("a.test", "UA-1", 1), ("b.test", "UA-2", 2), ("b.test", "UA-2", 2) }, loader.Loads.ToArray());
         Assert.AreEqual(1, StatusOf(proxies, "a.test").Failures);
         Assert.AreEqual(0, StatusOf(proxies, "a.test").Sessions);
     }
 
     [TestMethod]
-    public async Task ABlock_ThrowsTheSessionAway_AndTheProxyComesBackFromItsRestWithANewOne()
+    public async Task TwoBlocksInARow_ThrowTheSessionAway_AndTheProxyComesBackFromItsRestWithANewOne()
     {
         var clock = new ManualClock();
         var proxies = List(clock, "a.test");
@@ -180,19 +190,29 @@ public sealed class ProxySessionTests
         await GoodAsync(loader, 1);
         await GoodAsync(loader, 2);
 
-        var request = Page(3);
-        var blocked = await loader.LoadAsync(request, CancellationToken.None);
-        loader.ReportBlocked(request, blocked, "status 403");             // the scraper's checks, after the load
-        loader.ReportDone(request, blocked);
+        async Task BlockedAsync(int i)
+        {
+            var request = Page(i);
+            var blocked = await loader.LoadAsync(request, CancellationToken.None);
+            loader.ReportBlocked(request, blocked, "status 403");         // the scraper's checks, after the load
+            loader.ReportDone(request, blocked);
+        }
+
+        await BlockedAsync(3);
+        Assert.IsEmpty(loader.Closed, "a session with good answers is forgiven one block");
+        Assert.AreEqual(0, StatusOf(proxies, "a.test").BlockedSites, "and its proxy does not rest for it");
+        await BlockedAsync(4);
 
         Assert.HasCount(1, loader.Closed);
+        Assert.AreEqual(4, loader.Closed.Single().Loads);
         Assert.AreEqual((0, 0, 0), loader.Sessions);
+        Assert.AreEqual(2, StatusOf(proxies, "a.test").Blocks);
         Assert.AreEqual(1, StatusOf(proxies, "a.test").BlockedSites);
 
         clock.Now = clock.Now.AddMinutes(11);                             // the rest is over
-        await GoodAsync(loader, 4);
+        await GoodAsync(loader, 5);
 
-        Assert.AreEqual(("a.test", "UA-2", 2), loader.Last, "the same proxy, but a new user agent and an empty cookie jar");
+        Assert.AreEqual(("a.test", "UA-2", 2), loader.Last, "the same proxy, but another user agent and an empty cookie jar");
     }
 
     [TestMethod]
@@ -207,7 +227,7 @@ public sealed class ProxySessionTests
         await GoodAsync(loader, 2);
         await GoodAsync(loader, 3);
 
-        Assert.AreEqual("a.test", loader.Closed.Single().Proxy.Address.Host);
+        Assert.AreEqual("a.test", loader.Closed.Single().Proxy!.Address.Host);
         Assert.AreEqual(("b.test", "UA-2", 2), loader.Last);
         Assert.AreEqual(1, StatusOf(proxies, "a.test").BadResponses);
     }
@@ -226,7 +246,7 @@ public sealed class ProxySessionTests
         loader.ReportTimeout(request);                                    // the scraper tells it was a timeout
         await GoodAsync(loader, 2);
 
-        Assert.AreEqual("a.test", loader.Closed.Single().Proxy.Address.Host);
+        Assert.AreEqual("a.test", loader.Closed.Single().Proxy!.Address.Host);
         Assert.AreEqual(1, StatusOf(proxies, "a.test").Failures);
         Assert.AreEqual(("b.test", "UA-2", 2), loader.Last);
     }
@@ -242,7 +262,7 @@ public sealed class ProxySessionTests
         await Assert.ThrowsExactlyAsync<NonRetryableException>(() => loader.LoadAsync(Page(2), CancellationToken.None));
         await Assert.ThrowsExactlyAsync<NonRetryableException>(() => loader.LoadAsync(Page(3), CancellationToken.None));
 
-        Assert.AreEqual("a.test", loader.Closed.Single().Proxy.Address.Host);
+        Assert.AreEqual("a.test", loader.Closed.Single().Proxy!.Address.Host);
         Assert.AreEqual(1, StatusOf(proxies, "a.test").Failures);
         CollectionAssert.AreEqual(new[] { ("b.test", "UA-2", 2), ("b.test", "UA-2", 2) }, loader.Loads.Skip(1).ToArray(),
             "the page's fault, not the session's");
@@ -308,7 +328,7 @@ public sealed class ProxySessionTests
         loader.Gate = null;
         await GoodAsync(loader, 3);
 
-        Assert.AreEqual("a.test", loader.Closed.Single().Proxy.Address.Host);
+        Assert.AreEqual("a.test", loader.Closed.Single().Proxy!.Address.Host);
         Assert.AreEqual(("b.test", "UA-2", 2), loader.Last);
         Assert.AreEqual(1, proxies.Status().Sum(s => s.Sessions));
     }
@@ -355,9 +375,9 @@ public sealed class ProxySessionTests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task Scraper_ThrowsAwayASessionThatGotAPageWrong_AndKeepsTheOneThatGetsItRight()
+    public async Task Scraper_ThrowsAwayASessionThatGotItsFirstPageWrong_AndForgivesOneBlockToAGoodOne()
     {
-        var proxies = List(new ManualClock(), "junk.test", "good.test", "spare.test", "unused.test");
+        var proxies = List(new ManualClock(), "junk.test", "good.test", "spare.test");
         var loader = new FakeSessionLoader(proxies) { Behaviour = { ["junk.test"] = Proxy.Junk } };
         var options = ScraperTests.FastOptions();
         options.MaxConcurrency = 1;
@@ -375,16 +395,154 @@ public sealed class ProxySessionTests
         ScrapeRequest[] requests = [Page(1), new($"http://{Site}/missing"), .. Enumerable.Range(2, 9).Select(Page)];
         var result = await scraper.RunToListAsync(requests);
 
-        // junk: a bad page, thrown away; good: its 404 is the site's answer and it goes on, until the handler's block on /5
-        // throws it away; spare takes the rest
+        // junk: a bad first page, thrown away; good: its 404 is the site's answer, and the handler's block on /5 is forgiven
         Assert.HasCount(10, result.Items);
         Assert.HasCount(1, result.Failed);
-        CollectionAssert.AreEqual(new[] { "junk.test", "good.test" }, loader.Closed.Select(s => s.Proxy.Address.Host).ToArray());
+        Assert.AreEqual("junk.test", loader.Closed.Single().Proxy!.Address.Host);
         Assert.HasCount(1, loader.Loads.Where(l => l.Proxy == "good.test").Distinct(), "one session for good");
-        Assert.AreEqual(5, loader.Loads.Count(l => l.Proxy == "good.test"), "/1 (a retry), /missing, /2, /3, /4, then /5 blocked");
-        Assert.IsGreaterThan(1, loader.Loads.Count(l => l.Proxy == "spare.test"));
-        Assert.HasCount(1, loader.Loads.Where(l => l.Proxy == "spare.test").Distinct(), "one session for spare");
-        Assert.AreEqual(0, StatusOf(proxies, "unused.test").Loads);
+        Assert.AreEqual(12, loader.Loads.Count(l => l.Proxy == "good.test"), "/1 again, /missing, /2 to /10, /5 again");
+        Assert.AreEqual(0, StatusOf(proxies, "spare.test").Loads);
         Assert.AreEqual((0, 0, 1), loader.Sessions, "the scraper gave every answer its verdict");
+    }
+
+    // ------------------------------------------------------------------ how many failures a session survives
+
+    private static async Task FailAsync(FakeSessionLoader loader, int i)
+    {
+        loader.Behaviour["a.test"] = Proxy.Refuses;
+        await Assert.ThrowsExactlyAsync<HttpRequestException>(() => loader.LoadAsync(Page(i), CancellationToken.None));
+        loader.Behaviour["a.test"] = Proxy.Ok;
+    }
+
+    [TestMethod]
+    public async Task FirstLoadFails_TheSessionIsThrownAway()
+    {
+        var loader = new FakeSessionLoader(List(new ManualClock(), "a.test", "b.test"));
+
+        await FailAsync(loader, 1);
+
+        Assert.HasCount(1, loader.Closed);
+    }
+
+    [TestMethod]
+    public async Task OneGoodAnswerAndAFailure_TheSessionLives_ASecondFailureInARowThrowsItAway()
+    {
+        var proxies = List(new ManualClock(), "a.test", "b.test");
+        var loader = new FakeSessionLoader(proxies);
+        await GoodAsync(loader, 1);
+
+        await FailAsync(loader, 2);
+        Assert.IsEmpty(loader.Closed);
+        Assert.AreEqual(1, StatusOf(proxies, "a.test").Failures, "counted");
+        await GoodAsync(loader, 3);
+        Assert.AreEqual(("a.test", "UA-1", 1), loader.Last, "the same session goes on");
+
+        await FailAsync(loader, 4);
+        Assert.IsEmpty(loader.Closed, "a good answer between starts the count again");
+        await FailAsync(loader, 5);
+        Assert.HasCount(1, loader.Closed, "the second failure in a row");
+        Assert.AreEqual(3, StatusOf(proxies, "a.test").Failures);
+    }
+
+    [TestMethod]
+    public async Task TheToleranceIsSettable()
+    {
+        var loader = new FakeSessionLoader(List(new ManualClock(), "a.test", "b.test"));
+        loader.Tolerate(trustedAfter: 3, maxInARow: 3);
+        await GoodAsync(loader, 1);
+        await GoodAsync(loader, 2);
+        await FailAsync(loader, 3);
+        Assert.HasCount(1, loader.Closed, "two good answers are not enough here");
+
+        await GoodAsync(loader, 4);
+        await GoodAsync(loader, 5);
+        await GoodAsync(loader, 6);
+        loader.Behaviour["b.test"] = Proxy.Refuses;
+        for (var i = 7; i <= 8; i++) await Assert.ThrowsExactlyAsync<HttpRequestException>(() => loader.LoadAsync(Page(i), CancellationToken.None));
+        Assert.HasCount(1, loader.Closed, "two in a row are forgiven");
+        await Assert.ThrowsExactlyAsync<HttpRequestException>(() => loader.LoadAsync(Page(9), CancellationToken.None));
+        Assert.HasCount(2, loader.Closed, "the third is not");
+    }
+
+    // ------------------------------------------------------------------ without proxies
+
+    [TestMethod]
+    public async Task WithoutProxies_ASessionKeepsItsUserAgentAndCookies_ANewSessionHasNewOnes()
+    {
+        var clock = new ManualClock();
+        var loader = new FakeSessionLoader(null, clock: clock);
+
+        for (var i = 1; i <= 3; i++) await GoodAsync(loader, i);
+        Assert.HasCount(1, loader.Loads.Distinct(), "the user agent never changes while the session lives");
+        Assert.AreEqual(("direct", "UA-1", 1), loader.Last);
+
+        for (var i = 4; i <= 5; i++)
+        {
+            var request = Page(i);
+            var response = await loader.LoadAsync(request, CancellationToken.None);
+            loader.ReportBlocked(request, response, "captcha");
+        }
+        await GoodAsync(loader, 6);
+
+        Assert.HasCount(1, loader.Closed);
+        Assert.AreEqual(("direct", "UA-2", 2), loader.Last, "a new session: another user agent, an empty cookie jar");
+        Assert.AreEqual(1, loader.AgentList.Status().Single(a => a.UserAgent == "UA-1").BlockedSites);
+    }
+
+    // ------------------------------------------------------------------ user agents rest as proxies do
+
+    [TestMethod]
+    public async Task TheUserAgentOfASessionThrownAwayForABlock_RestsForThatSite()
+    {
+        var clock = new ManualClock();
+        var agents = new UserAgentList(["UA-1", "UA-2"]) { Clock = clock, BlockPolicy = ProxyBlockPolicy.Block10Minutes };
+        var loader = new FakeSessionLoader(List(clock, Hosts(10)), agents);
+
+        async Task<string?> BlockedFirstLoadAsync(string site)
+        {
+            var request = new ScrapeRequest($"http://{site}/1");
+            var response = await loader.LoadAsync(request, CancellationToken.None);
+            loader.ReportBlocked(request, response, "403");
+            return loader.Last.Agent;
+        }
+
+        Assert.AreEqual("UA-1", await BlockedFirstLoadAsync(Site));
+        clock.Now = clock.Now.AddMinutes(1);
+        Assert.AreEqual("UA-2", await BlockedFirstLoadAsync(Site), "UA-1 rests for the site");
+        Assert.AreEqual("UA-1", await BlockedFirstLoadAsync(Site), "both rest: the one that comes back first");
+        Assert.AreEqual("UA-2", await BlockedFirstLoadAsync("other.test"), "UA-2 rests for shop.test only");
+
+        var status = agents.Status().Single(a => a.UserAgent == "UA-1");
+        Assert.AreEqual(2, status.Blocks);
+        Assert.AreEqual(1, status.BlockedSites);
+        Assert.AreEqual(0, status.Sessions);
+        Assert.AreEqual(2, agents.Status().Single(a => a.UserAgent == "UA-2").BlockedSites);
+        StringAssert.Contains(agents.ToString(), "2 user agents");
+
+        clock.Now = clock.Now.AddMinutes(11);
+        Assert.AreEqual(0, agents.Status().Sum(a => a.BlockedSites), "the rest is over");
+    }
+
+    [TestMethod]
+    public async Task AUserAgentWithABadResponse_GoesAfterTheCleanOnesForThatSite()
+    {
+        var clock = new ManualClock();
+        var agents = new UserAgentList(["UA-1", "UA-2", "UA-3"]) { Clock = clock };
+        var loader = new FakeSessionLoader(List(clock, Hosts(10)), agents);
+
+        var request = Page(1);
+        var response = await loader.LoadAsync(request, CancellationToken.None);
+        loader.ReportBadResponse(request, response, "no marker");             // UA-1: one bad response, not a rest
+
+        loader.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loads = Enumerable.Range(2, 3).Select(i => GoodAsync(loader, i)).ToArray();
+        while (loader.Loads.Count < 4) await Task.Delay(5);
+        loader.Gate.SetResult();
+        await Task.WhenAll(loads);
+
+        CollectionAssert.AreEqual(new[] { "UA-1", "UA-2", "UA-3", "UA-2" }, loader.Loads.Select(l => l.Agent).ToArray(),
+            "a clean user agent goes first, even one another session has");
+        Assert.AreEqual(0, agents.Status().Single(a => a.UserAgent == "UA-1").BlockedSites);
+        Assert.AreEqual(1, agents.Status().Single(a => a.UserAgent == "UA-1").BadResponses);
     }
 }
