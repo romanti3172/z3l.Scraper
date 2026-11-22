@@ -94,7 +94,9 @@ public sealed class IntegrationTests
         loaderOptions.DefaultHeaders["Accept-Language"] = "de-DE";
         using var loader = new HttpPageLoader(loaderOptions);
 
-        var scraper = new Scraper(loader, ScraperTests.FastOptions())
+        var options = ScraperTests.FastOptions();
+        options.MaxConcurrency = 1;     // one session: its cookie jar keeps the cookie for the next page
+        var scraper = new Scraper(loader, options)
             .Route("default", ctx => ctx.Emit(ctx.Html.Find(HtmlTag.Body).Text()!))
             .Route("cookie", ctx =>
             {
