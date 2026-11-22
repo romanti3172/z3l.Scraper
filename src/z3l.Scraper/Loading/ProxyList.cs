@@ -157,11 +157,17 @@ public sealed record ProxyStatus(ProxyAddress Address, long Loads, long Successe
 /// and keep loading through it while it does well; a new session takes a proxy no other session uses when there is one.
 /// When every proxy rests for a site, a load waits for the first one to come back (the scraper's RequestTimeout limits the wait).
 /// Thread-safe.
+/// <para>
+/// The settings (<see cref="BlockPolicy"/>, <see cref="MaxConsecutiveFailures"/>, the pauses...) are read each time they are needed:
+/// a list from <see cref="FromFile"/> or <see cref="FromUrlAsync"/> is set after it is made, and a change applies from the next
+/// block, failure or check of the file on.
+/// </para>
 /// </summary>
 /// <example>
 /// <code>
 /// var proxies = ProxyList.FromFile("proxies.txt");                      // re-read when the file changes
 /// // or: await ProxyList.FromUrlAsync(new Uri("https://proxies.example/list.txt"));   // re-read every 5 minutes
+/// proxies.DeadProxyPause = TimeSpan.FromMinutes(30);
 /// using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
 /// </code>
 /// </example>
@@ -247,26 +253,26 @@ public sealed class ProxyList
 
     private const string What = "Proxy list";
 
-    /// <summary>What happens to a proxy a site blocks.</summary>
-    public ProxyBlockPolicy BlockPolicy { get; }
+    /// <summary>What happens to a proxy a site blocks. An hour of rest for that site by default.</summary>
+    public ProxyBlockPolicy BlockPolicy { get; set; }
 
     /// <summary>Failures in a row (no connection, 407...) after which a proxy rests for every site.</summary>
-    public int MaxConsecutiveFailures { get; init; } = 3;
+    public int MaxConsecutiveFailures { get; set; } = 3;
 
     /// <summary>How long a failing proxy rests.</summary>
-    public TimeSpan DeadProxyPause { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan DeadProxyPause { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// Bad responses in a row (not the page: the proxy's own page, a cut-off one...) after which a proxy rests for that site.
     /// Counted per site, so a broken site does not take the proxies from the others.
     /// </summary>
-    public int MaxConsecutiveBadResponses { get; init; } = 3;
+    public int MaxConsecutiveBadResponses { get; set; } = 3;
 
     /// <summary>How long a proxy with bad responses in a row rests for the site.</summary>
-    public TimeSpan BadResponsePause { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan BadResponsePause { get; set; } = TimeSpan.FromMinutes(10);
 
-    /// <summary>How often the file is checked for changes.</summary>
-    public TimeSpan FileCheckInterval { get; init; } = TimeSpan.FromSeconds(5);
+    /// <summary>How often the file of <see cref="FromFile"/> is checked for changes.</summary>
+    public TimeSpan FileCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Time source; tests set a manual one before the first load.</summary>
     internal TimeProvider Clock { get; set; } = TimeProvider.System;

@@ -26,6 +26,11 @@ public sealed record UserAgentStatus(string UserAgent, long Loads, long Successe
 /// counted here. When every user agent rests for a site, a new session takes the one that comes
 /// back first (a load never waits for a user agent). Thread-safe.
 /// </para>
+/// <para>
+/// The settings (<see cref="BlockPolicy"/>, <see cref="MaxConsecutiveBadResponses"/>, <see cref="BadResponsePause"/>,
+/// <see cref="FileCheckInterval"/>) are read each time they are needed: a list from <see cref="FromFile"/> or
+/// <see cref="FromUrlAsync"/> is set after it is made, and a change applies from the next block or check of the file on.
+/// </para>
 /// </summary>
 /// <example>
 /// <code>
@@ -109,16 +114,16 @@ public sealed class UserAgentList
     }
 
     /// <summary>What happens to a user agent whose session a site blocked: it rests for that site. An hour by default.</summary>
-    public ProxyBlockPolicy BlockPolicy { get; init; } = ProxyBlockPolicy.Block1Hour;
+    public ProxyBlockPolicy BlockPolicy { get; set; } = ProxyBlockPolicy.Block1Hour;
 
     /// <summary>Bad responses in a row on a site after which a user agent rests for that site.</summary>
-    public int MaxConsecutiveBadResponses { get; init; } = 3;
+    public int MaxConsecutiveBadResponses { get; set; } = 3;
 
     /// <summary>How long a user agent with bad responses in a row rests for the site, and how long one puts it after the clean ones.</summary>
-    public TimeSpan BadResponsePause { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan BadResponsePause { get; set; } = TimeSpan.FromMinutes(10);
 
-    /// <summary>How often the file is checked for changes.</summary>
-    public TimeSpan FileCheckInterval { get; init; } = TimeSpan.FromSeconds(5);
+    /// <summary>How often the file of <see cref="FromFile"/> is checked for changes.</summary>
+    public TimeSpan FileCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Time source; tests set a manual one before the first call.</summary>
     internal TimeProvider Clock { get; set; } = TimeProvider.System;

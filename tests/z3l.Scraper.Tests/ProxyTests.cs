@@ -318,6 +318,42 @@ public sealed class ProxyTests
     }
 
     [TestMethod]
+    public async Task File_SettingsOfAListFromAFile_ApplyWhenSetAfterIt()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"z3l-proxies-{Guid.NewGuid():N}.txt");
+        try
+        {
+            await File.WriteAllLinesAsync(path, ["a.test:1", "b.test:1"]);
+            var clock = new ManualClock();
+            var start = clock.Now;
+            var list = ProxyList.FromFile(path);
+            list.Clock = clock;
+            list.BlockPolicy = ProxyBlockPolicy.Block10Minutes;
+            list.FileCheckInterval = TimeSpan.FromMinutes(1);
+
+            var a = await list.AcquireAsync(Site, CancellationToken.None);
+            list.ReportBlocked(a, Site);
+            await File.WriteAllLinesAsync(path, ["a.test:1", "c.test:1"]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+
+            clock.Now = start.AddSeconds(30);
+            Assert.AreEqual("b.test", await Next(list), "within FileCheckInterval the file is not read again");
+            clock.Now = start.AddSeconds(90);
+            Assert.AreEqual("c.test", await Next(list), "past FileCheckInterval: b is gone");
+
+            int BlockedSitesOfA() => list.Status().Single(s => s.Address.Host == "a.test").BlockedSites;
+            clock.Now = start.AddMinutes(9);
+            Assert.AreEqual(1, BlockedSitesOfA());
+            clock.Now = start.AddMinutes(11);
+            Assert.AreEqual(0, BlockedSitesOfA(), "Block10Minutes rests it 10 minutes, the default an hour");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
     public void File_MissingOrWithoutProxies_Throws()
     {
         Assert.ThrowsExactly<FileNotFoundException>(() => ProxyList.FromFile(Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.txt")));
@@ -799,6 +835,34 @@ public sealed class ProxyTests
             clock.Now = clock.Now.AddSeconds(10);
             Assert.AreEqual("UA-3", list.Next());
             Assert.AreEqual(2, list.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
+    public async Task UserAgents_FileCheckInterval_AppliesWhenSetAfterFromFile()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"z3l-agents-{Guid.NewGuid():N}.txt");
+        try
+        {
+            await File.WriteAllLinesAsync(path, ["UA-1", "UA-2"]);
+            var clock = new ManualClock();
+            var start = clock.Now;
+            var list = UserAgentList.FromFile(path);
+            list.Clock = clock;
+            list.FileCheckInterval = TimeSpan.FromMinutes(1);
+            Assert.AreEqual("UA-1", list.Next());
+
+            await File.WriteAllLinesAsync(path, ["UA-3"]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+            clock.Now = start.AddSeconds(30);
+            Assert.AreEqual("UA-2", list.Next(), "within FileCheckInterval the file is not read again");
+            clock.Now = start.AddSeconds(90);
+            Assert.AreEqual("UA-3", list.Next());
+            Assert.AreEqual(1, list.Count);
         }
         finally
         {
