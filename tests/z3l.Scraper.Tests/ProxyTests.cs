@@ -399,7 +399,7 @@ public sealed class ProxyTests
         public ConcurrentQueue<string> Cookies { get; } = new();
         public volatile int Status;
 
-        public static async Task<FakeProxy> StartAsync(int status, string body, TimeSpan delay = default, string host = "127.0.0.1")
+        public static async Task<FakeProxy> StartAsync(int status, string body, bool hangs = false, string host = "127.0.0.1")
         {
             var builder = WebApplication.CreateSlimBuilder();
             builder.Logging.ClearProviders();
@@ -411,9 +411,9 @@ public sealed class ProxyTests
                 proxy.Requests.Enqueue($"{http.Request.Host}{http.Request.Path}");
                 proxy.UserAgents.Enqueue(http.Request.Headers.UserAgent.ToString());
                 proxy.Cookies.Enqueue(http.Request.Headers.Cookie.ToString());
-                if (delay > TimeSpan.Zero)
+                if (hangs)
                 {
-                    try { await Task.Delay(delay, http.RequestAborted); }
+                    try { await Task.Delay(Timeout.Infinite, http.RequestAborted); }       // never answers: until the client gives up
                     catch (OperationCanceledException) { return; }
                 }
                 http.Response.StatusCode = proxy.Status;
@@ -482,13 +482,16 @@ public sealed class ProxyTests
     [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Loader_ProxyThatHangs_ATimeoutIsAFailureOfTheProxy()
     {
-        await using var hanging = await FakeProxy.StartAsync(200, "<html><body>late</body></html>", TimeSpan.FromSeconds(20));
+        await using var hanging = await FakeProxy.StartAsync(200, "<html><body>late</body></html>", hangs: true);
         await using var good = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
         var proxies = new ProxyList([hanging.Address, good.Address]);
         using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
         var options = ScraperTests.FastOptions();
         options.MaxConcurrency = 1;
-        options.RequestTimeout = TimeSpan.FromMilliseconds(300);
+        // the hanging proxy runs out of it whatever it is, and no other load may: a late first answer of the good proxy would be a failure
+        // of that proxy too, and the retry would go back to the hanging one. With the CPU overloaded the first request took up to 1.8 s
+        // just to reach the hanging proxy; with 300 ms it often never did
+        options.RequestTimeout = TimeSpan.FromSeconds(10);
         var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
 
         var result = await scraper.RunToListAsync(Enumerable.Range(1, 5).Select(i => (ScrapeRequest)$"http://{Site}/p/{i}"));
