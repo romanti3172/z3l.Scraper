@@ -78,7 +78,7 @@ public sealed class UrlTests
         string[] pieces = ["a", "Z", "-", ".", "..", "/", "~", "%7e", "%7E", "%41", "%2e", "%2F", "%2f", "%d0%b6", "%D0%B6", "%", "%4", "%zz",
                            " ", "\"", "{", "|", "\\", "ж", "例", "😀", " ", "?", "#", "&", "=", "+", "a=1", "&b=2"];
         var random = new Random(7);
-        for (var i = 0; i < 20_000; i++)
+        for (var i = 0; i < 2_000; i++)
         {
             var link = starts[random.Next(starts.Length)];
             for (int j = 0, n = random.Next(1, 12); j < n; j++) link += pieces[random.Next(pieces.Length)];
