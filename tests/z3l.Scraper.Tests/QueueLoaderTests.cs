@@ -110,8 +110,10 @@ public sealed class QueueLoaderTests
         await WaitUntilAsync(() => loader.Waiting.Count == 20, "loads sent");
         loader.AnswerAll(_ => ScraperTests.Html("ok"));
 
-        // 2 in handlers, 18 waiting > 4: paused
+        // 2 in handlers, 18 waiting > 4: paused. The gate opens once both handlers are in: a page may have its slot and not be in its
+        // handler yet when the loader is paused, and then it would come in after the first handler is done
         await WaitUntilAsync(() => loader.Paused, "the loader is paused while pages wait for handlers");
+        await WaitUntilAsync(() => Volatile.Read(ref running) >= 2, "MaxConcurrency handlers at once");
         gate.SetResult();
         var result = await run;
 
@@ -158,17 +160,24 @@ public sealed class QueueLoaderTests
     [Timeout(20_000, CooperativeCancellation = true)]
     public async Task PagesThroughTheQueue_FilesWithALocalLoader_EachWithItsOwnRules()
     {
+        const string Hung = "https://q.test/img/3.jpg";
         var queue = new ManualQueueLoader();
-        int filesAtOnce = 0, mostFilesAtOnce = 0, fileCalls = 0;
+        var outOfTime = new ConcurrentQueue<string>();
+        int filesAtOnce = 0, mostFilesAtOnce = 0, hungLoads = 0;
         var files = new LocalBlockAwareLoader(async (request, token) =>
         {
             InterlockedMax(ref mostFilesAtOnce, Interlocked.Increment(ref filesAtOnce));
             try
             {
-                // the first file hangs: RequestTimeout applies to the local loader
-                if (Interlocked.Increment(ref fileCalls) == 1) await Task.Delay(Timeout.Infinite, token);
+                // the first load of one file hangs: RequestTimeout applies to the local loader
+                if (request.Url == Hung && Interlocked.Increment(ref hungLoads) == 1) await Task.Delay(Timeout.Infinite, token);
                 await Task.Delay(20, token);
                 return new PageResponse(200, request.Url, [1, 2, 3], "image/jpeg");
+            }
+            catch (OperationCanceledException)
+            {
+                outOfTime.Enqueue(request.Url);
+                throw;
             }
             finally
             {
@@ -177,7 +186,7 @@ public sealed class QueueLoaderTests
         });
         var options = ScraperTests.FastOptions();
         options.MaxConcurrency = 2;
-        options.RequestTimeout = TimeSpan.FromMilliseconds(300);
+        options.RequestTimeout = TimeSpan.FromSeconds(1);      // the hung file waits it out; the others get slack for a busy machine
         var scraper = new Scraper(queue, options)
             .UseLoader(files, PageType.File)
             .Route(PageType.Listing, ctx => ctx.Enqueue(Enumerable.Range(0, 10).Select(i => $"/img/{i}.jpg"), PageType.File))
@@ -191,15 +200,17 @@ public sealed class QueueLoaderTests
         Assert.HasCount(10, result.Items, "10 distinct files");
         Assert.AreEqual(30, result.Stats.Succeeded);
         Assert.IsLessThanOrEqualTo(2, mostFilesAtOnce, "files: MaxConcurrency loads at once");
-        Assert.AreEqual(1, files.Timeouts, "the hung file timed out and was retried, reported to its own loader");
+        // the hung load always runs out of time; a 20 ms one may too on a busy machine, so the timeouts are matched to the loads, not counted
+        CollectionAssert.Contains(files.TimedOut.ToArray(), Hung, "the hung file timed out and was retried, reported to its own loader");
+        CollectionAssert.AreEquivalent(outOfTime.ToArray(), files.TimedOut.ToArray(), "every load out of time is reported once");
     }
 
     private sealed class LocalBlockAwareLoader(Func<ScrapeRequest, CancellationToken, Task<PageResponse>> load) : IBlockAwarePageLoader
     {
-        public int Timeouts;
+        public readonly ConcurrentQueue<string> TimedOut = new();
         public Task<PageResponse> LoadAsync(ScrapeRequest request, CancellationToken cancellationToken) => load(request, cancellationToken);
         public void ReportBlocked(ScrapeRequest request, PageResponse response, string reason) { }
-        public void ReportTimeout(ScrapeRequest request) => Interlocked.Increment(ref Timeouts);
+        public void ReportTimeout(ScrapeRequest request) => TimedOut.Enqueue(request.Url);
     }
 
     private sealed class QueueDelegateLoader(Func<ScrapeRequest, CancellationToken, Task<PageResponse>> load) : IQueuePageLoader

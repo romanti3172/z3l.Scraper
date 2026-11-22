@@ -79,7 +79,7 @@ internal sealed class TestSite : IAsyncDisposable
                 case 9:
                     return Results.Redirect("/p/9/new", permanent: true);
                 case 10 when first:
-                    await Task.Delay(TimeSpan.FromSeconds(5), http.RequestAborted);                    // the scraper times out first
+                    await Task.Delay(Timeout.Infinite, http.RequestAborted);                           // until the scraper gives up
                     break;
                 case 11:
                     http.Response.Headers.ContentEncoding = "gzip";
