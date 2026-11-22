@@ -24,7 +24,9 @@ public sealed class IntegrationTests
             MaxConcurrency = 4,
             MaxRetries = 3,
             RetryDelay = TimeSpan.FromMilliseconds(50),
-            RequestTimeout = TimeSpan.FromSeconds(3),     // the slow page waits 5 s; others get slack for a busy CI machine
+            // the slow page hangs until the scraper gives up, whatever the timeout. Any other page late for it would be a retry and a
+            // load more than counted below: with the CPU overloaded the first page of the fresh site took up to 3.2 s, the others 1 s
+            RequestTimeout = TimeSpan.FromSeconds(10),
             ProgressInterval = null,
             MaxThrottleDelay = TimeSpan.FromMilliseconds(100),   // the 429 and 503 throttle the shop; keep the pauses short
         };

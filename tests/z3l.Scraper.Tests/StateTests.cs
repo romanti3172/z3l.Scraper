@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -63,12 +64,11 @@ public sealed class StateTests
     }
 
     /// <summary>/0 -> /1 -> ... -> /9</summary>
-    private static DelegateLoader Chain(ConcurrentDictionary<int, int> loads, TimeSpan delay = default) => new(async (r, token) =>
+    private static DelegateLoader Chain(ConcurrentDictionary<int, int> loads) => new((r, _) =>
     {
         var n = int.Parse(r.Url[(r.Url.LastIndexOf('/') + 1)..]);
         loads.AddOrUpdate(n, 1, (_, c) => c + 1);
-        if (delay > TimeSpan.Zero) await Task.Delay(delay, token);
-        return PageResponse.FromText(200, r.Url, ScraperTests.Html(n < 9 ? $"<a href='/{n + 1}'>next</a>" : "end"));
+        return Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html(n < 9 ? $"<a href='/{n + 1}'>next</a>" : "end")));
     });
 
     private static Scraper ChainScraper(DelegateLoader loader, ScraperOptions options) =>
@@ -124,19 +124,23 @@ public sealed class StateTests
     [Timeout(30_000, CooperativeCancellation = true)]
     public async Task StateIsSavedWhileTheRunGoes()
     {
-        var loads = new ConcurrentDictionary<int, int>();
         var options = Options();
         options.StateSaveInterval = TimeSpan.FromMilliseconds(50);
         var seenOnDisk = false;
-        var scraper = new Scraper(Chain(loads, TimeSpan.FromMilliseconds(40)), options).Route("default", ctx =>
+        var scraper = new Scraper(Chain(new ConcurrentDictionary<int, int>()), options).Route("default", async ctx =>
         {
             ctx.Enqueue(ctx.Html.XPathValue("//a/@href"));
-            if (ctx.Request.Url.EndsWith("/6")) seenOnDisk = File.Exists(StatePath);
+            if (!ctx.Request.Url.EndsWith("/6")) return;
+
+            // the run cannot end while this handler waits, so only a save of every StateSaveInterval can write the file now. It is
+            // waited for, not expected by this page: a busy machine may get here before the first save
+            var waited = Stopwatch.StartNew();
+            while (!(seenOnDisk = File.Exists(StatePath)) && waited.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(10);
         });
 
         await scraper.RunToListAsync("https://s.test/0");
 
-        Assert.IsTrue(seenOnDisk, "the state file must exist during the run");
+        Assert.IsTrue(seenOnDisk, "the state file must be saved during the run");
         Assert.IsFalse(File.Exists(StatePath));
     }
 
