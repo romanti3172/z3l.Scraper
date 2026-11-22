@@ -45,7 +45,7 @@ internal sealed class PageParse : IScrapeHost
 
         var depth = parent == null ? 0 : parent.Depth + 1;
         request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
-        KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey());
+        KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey(uri));
         lock (_found)
         {
             if (key.HasValue && !_seen.Add(key.Value)) return false;
