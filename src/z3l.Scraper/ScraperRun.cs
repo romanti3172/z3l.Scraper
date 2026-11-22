@@ -61,7 +61,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     private readonly HostThrottle _throttle;
     private readonly RobotsCache? _robots;
     private readonly ICachingPageLoader? _cache;
-    private readonly ISnapshotPageLoader? _snapshots;
+    private readonly ISnapshotStore? _snapshots;
     private readonly string? _statePath;
     private readonly StateDataCodec? _codec;
     private readonly SemaphoreSlim _saveLock = new(1, 1);
@@ -111,7 +111,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
         }
         _cache = scraper.CachingPageLoader;
-        _snapshots = scraper.SnapshotPageLoader;
+        _snapshots = scraper.SnapshotStore;
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath) ? null : _options.StatePath;
         if (_statePath != null) _codec = new StateDataCodec(scraper.FindRoute, _options.StateJson);
         _queueLoaders = [.. scraper.Loaders.OfType<IQueuePageLoader>()];

@@ -76,7 +76,7 @@ public sealed class Scraper
     internal IEnumerable<IPageLoader> Loaders => _loaders.Values.Prepend(Loader).Distinct();
 
     private ICachingPageLoader? _cachingPageLoader;
-    private ISnapshotPageLoader? _snapshotPageLoader;
+    private ISnapshotStore? _snapshotStore;
 
     /// <summary>
     /// Keeps the pages the handlers took and gives them back instead of loading them again, for the labels of every loader:
@@ -96,17 +96,17 @@ public sealed class Scraper
 
     /// <summary>
     /// Saves the loaded pages that were not taken (blocked, missing, broken, or those whose handler threw), for the labels of every
-    /// loader: <see cref="Loading.SnapshotPageLoader"/> saves them in a folder, to show what the site answered. Null, the default, saves
+    /// loader: <see cref="Loading.SnapshotStore"/> saves them in a folder, to show what the site answered. Null, the default, saves
     /// nothing. Set it before the run.
     /// </summary>
     /// <exception cref="InvalidOperationException">Set while the scraper is running.</exception>
-    public ISnapshotPageLoader? SnapshotPageLoader
+    public ISnapshotStore? SnapshotStore
     {
-        get => _snapshotPageLoader;
+        get => _snapshotStore;
         set
         {
             ThrowIfRunning();
-            _snapshotPageLoader = value;
+            _snapshotStore = value;
         }
     }
 

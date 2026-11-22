@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace z3l.Scraper.Loading;
 
-/// <summary>Pages in a folder, for <see cref="CachingPageLoader"/> and <see cref="SnapshotPageLoader"/>: two files each, the body and its description.</summary>
+/// <summary>Pages in a folder, for <see cref="CachingPageLoader"/> and <see cref="SnapshotStore"/>: two files each, the body and its description.</summary>
 internal static class PageFiles
 {
     /// <summary>Ending of the description of a page; the body has the extension of its content type.</summary>

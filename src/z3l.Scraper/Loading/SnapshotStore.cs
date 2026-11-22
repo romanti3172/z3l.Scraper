@@ -4,17 +4,17 @@ namespace z3l.Scraper.Loading;
 
 /// <summary>
 /// Saves the loaded pages that were not taken in a folder, to show what the site answered: a captcha, "Product not found", a cut-off page,
-/// the page a handler choked on. Set it in <see cref="Scraper.SnapshotPageLoader"/>:
-/// <code>scraper.SnapshotPageLoader = new SnapshotPageLoader { Path = "snapshots", MaxPerKind = 20 };</code>
+/// the page a handler choked on. Set it in <see cref="Scraper.SnapshotStore"/>:
+/// <code>scraper.SnapshotStore = new SnapshotStore { Path = "snapshots", MaxPerKind = 20 };</code>
 /// Pages go to <c>{Path}/{label}/{kind}</c>, the kind being <c>blocked</c>, <c>retry</c>, <c>not-found</c> or <c>handler-error</c>
 /// (<see cref="SnapshotKind"/>), two files each: the body (<c>.html</c>, <c>.json</c>...) and its description (<c>.meta.json</c>: the request,
 /// the reason, the status, the headers, what the handler threw). Files of earlier runs stay.
 /// <para>
 /// To save the pages elsewhere (a database...) with the same labels, filter and limits, override <see cref="WriteAsync"/>; or implement
-/// <see cref="ISnapshotPageLoader"/> yourself.
+/// <see cref="ISnapshotStore"/> yourself.
 /// </para>
 /// </summary>
-public class SnapshotPageLoader : ISnapshotPageLoader
+public class SnapshotStore : ISnapshotStore
 {
     private const string Format = "z3l.Scraper snapshot";
     private const int Version = 1;
@@ -119,7 +119,7 @@ public class SnapshotPageLoader : ISnapshotPageLoader
     protected virtual async ValueTask WriteAsync(PageSnapshot snapshot, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        var root = Path is { Length: > 0 } path ? path : throw new InvalidOperationException("Set SnapshotPageLoader.Path: the folder of the snapshots");
+        var root = Path is { Length: > 0 } path ? path : throw new InvalidOperationException("Set SnapshotStore.Path: the folder of the snapshots");
         var request = snapshot.Request;
         var response = snapshot.Response;
         var folder = System.IO.Path.Combine(root, PageFiles.SafeName(request.Label.ToLowerInvariant()), FolderName(snapshot.Kind));

@@ -22,7 +22,7 @@ public enum SnapshotKind
     HandlerError,
 }
 
-/// <summary>A loaded page that was not taken, given to <see cref="ISnapshotPageLoader"/>.</summary>
+/// <summary>A loaded page that was not taken, given to <see cref="ISnapshotStore"/>.</summary>
 public sealed record PageSnapshot
 {
     /// <summary>The request; its <see cref="ScrapeRequest.Attempts"/> tells which attempt brought the page.</summary>
@@ -46,13 +46,13 @@ public sealed record PageSnapshot
 
 /// <summary>
 /// Saves the loaded pages that were not taken (blocked, missing, broken, or those whose handler threw) to show what the site answered.
-/// Set one in <see cref="Scraper.SnapshotPageLoader"/>. <see cref="SnapshotPageLoader"/> saves them in a folder; implement this interface to
+/// Set one in <see cref="Scraper.SnapshotStore"/>. <see cref="SnapshotStore"/> saves them in a folder; implement this interface to
 /// save them elsewhere (a database...).
 /// <para>
-/// It is not the loader of a label: the scraper calls it for the pages of every loader. Called from several threads at once.
+/// The scraper calls it for the pages of every loader, whatever their label. Called from several threads at once.
 /// </para>
 /// </summary>
-public interface ISnapshotPageLoader
+public interface ISnapshotStore
 {
     /// <summary>
     /// A loaded page was not taken: save it, if you want to. Called for every such attempt, retries included; a load that brought no page

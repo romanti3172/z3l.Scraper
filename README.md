@@ -788,7 +788,7 @@ Two helpers for the pages of every loader and label, set on the scraper:
 var scraper = new Scraper(loader, options)
 {
     CachingPageLoader = new CachingPageLoader { Path = "cache" },          // the pages the handlers took, given back next time
-    SnapshotPageLoader = new SnapshotPageLoader { Path = "snapshots" },    // the pages that were not taken, to look at
+    SnapshotStore = new SnapshotStore { Path = "snapshots" },              // the pages that were not taken, to look at
 };
 ```
 
@@ -813,13 +813,13 @@ new CachingPageLoader
 **Snapshots** are the loaded pages that were not taken: blocked, missing, failing the checks, or those whose handler threw,
 one for every such attempt. They go to `{Path}/{label}/{kind}`, the kind being `blocked`, `retry`, `not-found` or
 `handler-error`, two files each: the body and its description (the request, the reason, the status, the headers, what the
-handler threw). A load that brought no page (a network error, a timeout) has no snapshot. `SnapshotPageLoader` takes
+handler threw). A load that brought no page (a network error, a timeout) has no snapshot. `SnapshotStore` takes
 `Labels` and a `Filter` too (`snapshot => snapshot.Kind == SnapshotKind.Blocked`), and `MaxPerKind` (for each label and
 kind) and `MaxSnapshots` limit how many it saves; 0, the default, for no limit. Files of earlier runs stay.
 
 To keep the pages elsewhere, in a database for example, override the storage and keep the labels, the filter and the
 limits of the classes (`ReadAsync`, `WriteAsync`, `DeleteAsync` and `CountStored` of `CachingPageLoader`, `WriteAsync` of
-`SnapshotPageLoader`), or implement `ICachingPageLoader` or `ISnapshotPageLoader` yourself; `CachedPage.From` and
+`SnapshotStore`), or implement `ICachingPageLoader` or `ISnapshotStore` yourself; `CachedPage.From` and
 `ToResponse` turn a response into what to keep and back.
 
 ## Logging
