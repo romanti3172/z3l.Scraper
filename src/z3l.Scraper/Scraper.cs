@@ -266,7 +266,7 @@ public sealed class Scraper
             items.Add(item);
         }
         var run = _lastRun!;
-        return new ScrapeResult(items, [.. run.FailedRequests], run.Stats);
+        return new ScrapeResult { Items = items, Failed = [.. run.FailedRequests], Stats = run.Stats };
     }
 
     /// <summary>Runs the scraping from one or more requests and collects everything.</summary>

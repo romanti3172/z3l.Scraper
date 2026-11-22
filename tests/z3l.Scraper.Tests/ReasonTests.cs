@@ -8,6 +8,10 @@ namespace z3l.Scraper.Tests;
 [TestClass]
 public sealed class ReasonTests
 {
+    /// <summary>A group of Stats.Reasons with every property given.</summary>
+    internal static ReasonCount Group(ReasonKind kind, string reason, string label, string host, long count, long failed, string example, string exampleUrl) =>
+        new() { Kind = kind, Reason = reason, Label = label, Host = host, Count = count, Failed = failed, Example = example, ExampleUrl = exampleUrl };
+
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Checks_AreGroupedByReasonLabelAndHost()
@@ -28,8 +32,8 @@ public sealed class ReasonTests
 
         CollectionAssert.AreEqual(new[]
         {
-            new ReasonCount(ReasonKind.Blocked, "marker \"captcha\"", "Item", "a.test", 3, 1, "marker \"captcha\"", "https://a.test/item/1"),
-            new ReasonCount(ReasonKind.BadPage, "no \"class='price'\"", "Item", "b.test", 1, 0, "no \"class='price'\"", "https://b.test/item/1"),
+            Group(ReasonKind.Blocked, "marker \"captcha\"", "Item", "a.test", 3, 1, "marker \"captcha\"", "https://a.test/item/1"),
+            Group(ReasonKind.BadPage, "no \"class='price'\"", "Item", "b.test", 1, 0, "no \"class='price'\"", "https://b.test/item/1"),
         }, result.Stats.Reasons.ToArray());
         Assert.AreEqual(3, result.Stats.Retries);
     }
@@ -89,7 +93,7 @@ public sealed class ReasonTests
         Assert.AreEqual(1, reasons[ReasonKind.Timeout].Failed);
         Assert.AreEqual("InvalidOperationException", reasons[ReasonKind.HandlerError].Reason);
         Assert.AreEqual("no price on https://s.test/broken", reasons[ReasonKind.HandlerError].Example);
-        Assert.AreEqual(new ReasonCount(ReasonKind.NotFound, "status 404", "default", "s.test", 2, 1, "status 404", "https://s.test/gone"),
+        Assert.AreEqual(Group(ReasonKind.NotFound, "status 404", "default", "s.test", 2, 1, "status 404", "https://s.test/gone"),
             reasons[ReasonKind.NotFound], "NotFoundRetries 1: two attempts");
     }
 
@@ -141,17 +145,17 @@ public sealed class ReasonTests
 
         var reasons = stats.Reasons;
         Assert.HasCount(ScraperStats.MaxReasonGroups + 1, reasons);
-        Assert.AreEqual(new ReasonCount(ReasonKind.BadPage, ScraperStats.OtherReasons, "", "", 50, 0, "", ""), reasons[0]);
-        Assert.AreEqual(new ReasonCount(ReasonKind.BadPage, "no \"part 0\"", "Item", "s.test", 2, 1, "last", "https://s.test/0"), reasons[1]);
+        Assert.AreEqual(Group(ReasonKind.BadPage, ScraperStats.OtherReasons, "", "", 50, 0, "", ""), reasons[0]);
+        Assert.AreEqual(Group(ReasonKind.BadPage, "no \"part 0\"", "Item", "s.test", 2, 1, "last", "https://s.test/0"), reasons[1]);
     }
 
     [TestMethod]
     public void OneLine()
     {
         Assert.AreEqual("8711x blocked: marker \"captcha\" (Item, shop.com; 120 failed)",
-            new ReasonCount(ReasonKind.Blocked, "marker \"captcha\"", "Item", "shop.com", 8711, 120, "", "").ToString());
-        Assert.AreEqual("12x timeout: 120 s (Item, shop.com)", new ReasonCount(ReasonKind.Timeout, "120 s", "Item", "shop.com", 12, 0, "", "").ToString());
-        Assert.AreEqual("50x bad page: other reasons", new ReasonCount(ReasonKind.BadPage, "other reasons", "", "", 50, 0, "", "").ToString());
+            Group(ReasonKind.Blocked, "marker \"captcha\"", "Item", "shop.com", 8711, 120, "", "").ToString());
+        Assert.AreEqual("12x timeout: 120 s (Item, shop.com)", Group(ReasonKind.Timeout, "120 s", "Item", "shop.com", 12, 0, "", "").ToString());
+        Assert.AreEqual("50x bad page: other reasons", Group(ReasonKind.BadPage, "other reasons", "", "", 50, 0, "", "").ToString());
     }
 
     [TestMethod]

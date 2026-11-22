@@ -5,15 +5,29 @@ using z3l.Scraper.Diagnostics;
 namespace z3l.Scraper.Loading;
 
 /// <summary>State of one user agent, for logs and dashboards.</summary>
-/// <param name="UserAgent">The user agent.</param>
-/// <param name="Loads">Loads made with it.</param>
-/// <param name="Successes">Loads that got an answer.</param>
-/// <param name="Blocks">Answers that sites blocked.</param>
-/// <param name="BlockedSites">Sites it rests for now (blocked, or bad responses in a row).</param>
-/// <param name="BadResponses">Answers that were not the page.</param>
-/// <param name="Sessions">Sessions of loaders that use it now.</param>
-public sealed record UserAgentStatus(string UserAgent, long Loads, long Successes, long Blocks, int BlockedSites,
-    long BadResponses, int Sessions);
+public sealed record UserAgentStatus
+{
+    /// <summary>The user agent.</summary>
+    public required string UserAgent { get; init; }
+
+    /// <summary>Loads made with it.</summary>
+    public required long Loads { get; init; }
+
+    /// <summary>Loads that got an answer.</summary>
+    public required long Successes { get; init; }
+
+    /// <summary>Answers that sites blocked.</summary>
+    public required long Blocks { get; init; }
+
+    /// <summary>Sites it rests for now (blocked, or bad responses in a row).</summary>
+    public required int BlockedSites { get; init; }
+
+    /// <summary>Answers that were not the page.</summary>
+    public required long BadResponses { get; init; }
+
+    /// <summary>Sessions of loaders that use it now.</summary>
+    public required int Sessions { get; init; }
+}
 
 /// <summary>
 /// User agents for <see cref="HttpPageLoader"/>, given out in turn. From a list, a text file (read again when it changes) or a URL
@@ -156,8 +170,16 @@ public sealed class UserAgentList
         lock (_lock)
         {
             var now = Clock.GetUtcNow();
-            return [.. _entries.Select(e => new UserAgentStatus(e.UserAgent, e.Health.Loads, e.Health.Successes, e.Health.Blocks,
-                e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
+            return [.. _entries.Select(e => new UserAgentStatus
+            {
+                UserAgent = e.UserAgent,
+                Loads = e.Health.Loads,
+                Successes = e.Health.Successes,
+                Blocks = e.Health.Blocks,
+                BlockedSites = e.Health.CountBlockedSites(now),
+                BadResponses = e.Health.BadResponses,
+                Sessions = e.Health.Sessions,
+            })];
         }
     }
 

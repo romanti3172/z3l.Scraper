@@ -122,17 +122,35 @@ public sealed partial record ProxyAddress(string Scheme, string Host, int Port, 
 }
 
 /// <summary>State of one proxy, for logs and dashboards.</summary>
-/// <param name="Address">The proxy.</param>
-/// <param name="Loads">Loads given to it.</param>
-/// <param name="Successes">Loads that got an answer.</param>
-/// <param name="Failures">Loads that failed in the proxy (no connection, 407...).</param>
-/// <param name="Blocks">Answers that sites blocked.</param>
-/// <param name="Dead">Resting after failures in a row.</param>
-/// <param name="BlockedSites">Sites it rests for now (blocked, or bad responses in a row).</param>
-/// <param name="BadResponses">Answers that were not the page (its own page, a cut-off one...).</param>
-/// <param name="Sessions">Sessions of loaders open on it now (see <see cref="BlockAwarePageLoader"/>).</param>
-public sealed record ProxyStatus(ProxyAddress Address, long Loads, long Successes, long Failures, long Blocks, bool Dead, int BlockedSites,
-    long BadResponses = 0, int Sessions = 0);
+public sealed record ProxyStatus
+{
+    /// <summary>The proxy.</summary>
+    public required ProxyAddress Address { get; init; }
+
+    /// <summary>Loads given to it.</summary>
+    public required long Loads { get; init; }
+
+    /// <summary>Loads that got an answer.</summary>
+    public required long Successes { get; init; }
+
+    /// <summary>Loads that failed in the proxy (no connection, 407...).</summary>
+    public required long Failures { get; init; }
+
+    /// <summary>Answers that sites blocked.</summary>
+    public required long Blocks { get; init; }
+
+    /// <summary>Resting after failures in a row.</summary>
+    public required bool Dead { get; init; }
+
+    /// <summary>Sites it rests for now (blocked, or bad responses in a row).</summary>
+    public required int BlockedSites { get; init; }
+
+    /// <summary>Answers that were not the page (its own page, a cut-off one...).</summary>
+    public long BadResponses { get; init; }
+
+    /// <summary>Sessions of loaders open on it now (see <see cref="BlockAwarePageLoader"/>).</summary>
+    public int Sessions { get; init; }
+}
 
 /// <summary>
 /// Proxies for <see cref="HttpPageLoader"/>: given out in turn, put to rest for a site that blocks them
@@ -276,8 +294,18 @@ public sealed class ProxyList
         lock (_lock)
         {
             var now = Clock.GetUtcNow();
-            return [.. _entries.Select(e => new ProxyStatus(e.Address, e.Health.Loads, e.Health.Successes, e.Health.Failures, e.Health.Blocks,
-                e.Health.DeadUntil > now, e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
+            return [.. _entries.Select(e => new ProxyStatus
+            {
+                Address = e.Address,
+                Loads = e.Health.Loads,
+                Successes = e.Health.Successes,
+                Failures = e.Health.Failures,
+                Blocks = e.Health.Blocks,
+                Dead = e.Health.DeadUntil > now,
+                BlockedSites = e.Health.CountBlockedSites(now),
+                BadResponses = e.Health.BadResponses,
+                Sessions = e.Health.Sessions,
+            })];
         }
     }
 

@@ -358,7 +358,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         Stats.AddEnqueued();        // accepted and failed at once, so Pending stays right
         _metrics?.Enqueued(request.Label);
         Note(new Trouble(ReasonKind.BadUrl, "not an absolute http(s) URL", request.Url), request, failed: true);
-        RecordFailure(new FailedRequest(request, FailureReason.BadUrl, $"not an absolute http(s) URL: \"{request.Url}\"", null, null));
+        RecordFailure(new FailedRequest { Request = request, Reason = FailureReason.BadUrl, Message = $"not an absolute http(s) URL: \"{request.Url}\"" });
         return false;
     }
 
@@ -963,7 +963,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         if (_snapshots == null || response == null) return;
         try
         {
-            await _snapshots.SaveAsync(new PageSnapshot(request, response, kind, reason, exception, fromCache), token).ConfigureAwait(false);
+            var snapshot = new PageSnapshot { Request = request, Response = response, Kind = kind, Reason = reason, Exception = exception, FromCache = fromCache };
+            await _snapshots.SaveAsync(snapshot, token).ConfigureAwait(false);
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
         {
@@ -1093,7 +1094,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
 
     private void Fail(ScrapeRequest request, FailureReason reason, string message, int? status, Exception? error)
     {
-        RecordFailure(new FailedRequest(request, reason, message, status, error));
+        RecordFailure(new FailedRequest { Request = request, Reason = reason, Message = message, StatusCode = status, Exception = error });
         ForgetFailed(request, reason);
         Finish();
     }

@@ -24,12 +24,23 @@ public enum FailureReason
 }
 
 /// <summary>A request that ended without a handled page.</summary>
-/// <param name="Request">The request.</param>
-/// <param name="Reason">Why it failed.</param>
-/// <param name="Message">Details of the last failure.</param>
-/// <param name="StatusCode">Status code of the last response, if there was one.</param>
-/// <param name="Exception">Exception of the last attempt, if there was one.</param>
-public sealed record FailedRequest(ScrapeRequest Request, FailureReason Reason, string Message, int? StatusCode, Exception? Exception);
+public sealed record FailedRequest
+{
+    /// <summary>The request.</summary>
+    public required ScrapeRequest Request { get; init; }
+
+    /// <summary>Why it failed.</summary>
+    public required FailureReason Reason { get; init; }
+
+    /// <summary>Details of the last failure.</summary>
+    public required string Message { get; init; }
+
+    /// <summary>Status code of the last response, if there was one.</summary>
+    public int? StatusCode { get; init; }
+
+    /// <summary>Exception of the last attempt, if there was one.</summary>
+    public Exception? Exception { get; init; }
+}
 
 /// <summary>What kind of trouble an attempt ran into: the groups of <see cref="ScraperStats.Reasons"/>.</summary>
 public enum ReasonKind
@@ -69,23 +80,39 @@ public enum ReasonKind
 /// A group of <see cref="ScraperStats.Reasons"/>: how many times attempts of one label on one host ran into one reason, and how many
 /// of those ended their request.
 /// </summary>
-/// <param name="Kind">What kind of trouble.</param>
-/// <param name="Reason">
-/// The reason, the same for every attempt of the group: the check that failed (<c>status 403</c>, <c>marker "captcha"</c>,
-/// <c>no "price"</c>), the timeout, the kind of a load error (<c>ConnectionError</c>, <c>ProxyTunnelError</c>), the type of the
-/// exception a handler threw, or the message of a <see cref="RetryRequestException"/>, of a <see cref="NonRetryableException"/> or
-/// of a service's refusal for its limits.
-/// </param>
-/// <param name="Label">Label of the requests; empty in the "other reasons" group.</param>
-/// <param name="Host">Host of the requests, with the port when it is not the default one; empty in the "other reasons" group.</param>
-/// <param name="Count">How many times: retries and failures together.</param>
-/// <param name="Failed">How many of them were the last attempt of a request that failed.</param>
-/// <param name="Example">
-/// The message of the last of them, with the details the reason leaves out: an exception message names the proxy, the IP...
-/// </param>
-/// <param name="ExampleUrl">The URL of the last of them.</param>
-public sealed record ReasonCount(ReasonKind Kind, string Reason, string Label, string Host, long Count, long Failed, string Example, string ExampleUrl)
+public sealed record ReasonCount
 {
+    /// <summary>What kind of trouble.</summary>
+    public required ReasonKind Kind { get; init; }
+
+    /// <summary>
+    /// The reason, the same for every attempt of the group: the check that failed (<c>status 403</c>, <c>marker "captcha"</c>,
+    /// <c>no "price"</c>), the timeout, the kind of a load error (<c>ConnectionError</c>, <c>ProxyTunnelError</c>), the type of the
+    /// exception a handler threw, or the message of a <see cref="RetryRequestException"/>, of a <see cref="NonRetryableException"/> or
+    /// of a service's refusal for its limits.
+    /// </summary>
+    public required string Reason { get; init; }
+
+    /// <summary>Label of the requests; empty in the "other reasons" group.</summary>
+    public required string Label { get; init; }
+
+    /// <summary>Host of the requests, with the port when it is not the default one; empty in the "other reasons" group.</summary>
+    public required string Host { get; init; }
+
+    /// <summary>How many times: retries and failures together.</summary>
+    public required long Count { get; init; }
+
+    /// <summary>How many of them were the last attempt of a request that failed.</summary>
+    public required long Failed { get; init; }
+
+    /// <summary>
+    /// The message of the last of them, with the details the reason leaves out: an exception message names the proxy, the IP...
+    /// </summary>
+    public required string Example { get; init; }
+
+    /// <summary>The URL of the last of them.</summary>
+    public required string ExampleUrl { get; init; }
+
     /// <summary>One line, as the last log line of a run shows it: <c>8711x blocked: marker "captcha" (Item, shop.com; 120 failed)</c>.</summary>
     public override string ToString()
     {
@@ -188,8 +215,17 @@ public sealed class ScraperStats
             .Select(pair =>
             {
                 var last = Volatile.Read(ref pair.Value.Last);
-                return new ReasonCount(pair.Key.Kind, pair.Key.Reason, pair.Key.Label, pair.Key.Host, Interlocked.Read(ref pair.Value.Count),
-                    Interlocked.Read(ref pair.Value.Failed), last?.Message ?? "", last?.Url ?? "");
+                return new ReasonCount
+                {
+                    Kind = pair.Key.Kind,
+                    Reason = pair.Key.Reason,
+                    Label = pair.Key.Label,
+                    Host = pair.Key.Host,
+                    Count = Interlocked.Read(ref pair.Value.Count),
+                    Failed = Interlocked.Read(ref pair.Value.Failed),
+                    Example = last?.Message ?? "",
+                    ExampleUrl = last?.Url ?? "",
+                };
             })
             .OrderByDescending(x => x.Count)
             .ThenBy(x => x.Kind)
@@ -265,11 +301,17 @@ public sealed class ScraperStats
 }
 
 /// <summary>Everything a run produced.</summary>
-/// <param name="Items">Emitted items, of any types, in the order they came.</param>
-/// <param name="Failed">Requests that failed.</param>
-/// <param name="Stats">Final counters.</param>
-public sealed record ScrapeResult(IReadOnlyList<object> Items, IReadOnlyList<FailedRequest> Failed, ScraperStats Stats)
+public sealed record ScrapeResult
 {
+    /// <summary>Emitted items, of any types, in the order they came.</summary>
+    public required IReadOnlyList<object> Items { get; init; }
+
+    /// <summary>Requests that failed.</summary>
+    public required IReadOnlyList<FailedRequest> Failed { get; init; }
+
+    /// <summary>Final counters.</summary>
+    public required ScraperStats Stats { get; init; }
+
     /// <summary>The items of one type (and of types derived from it).</summary>
     public IReadOnlyList<T> ItemsOf<T>() => [.. Items.OfType<T>()];
 }
