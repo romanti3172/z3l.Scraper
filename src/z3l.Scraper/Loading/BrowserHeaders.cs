@@ -29,8 +29,16 @@ internal static class BrowserHeaders
 
     internal const string PageAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
 
-    /// <summary>What HttpClient decodes: zstd, which Chrome and Firefox announce too, it does not.</summary>
+#if NET11_0_OR_GREATER
+    /// <summary>
+    /// What HttpClient decodes, as Chrome and Firefox announce it: zstd too since .NET 11. The handler would add zstd anyway, as it
+    /// adds every encoding it decodes that the header lacks.
+    /// </summary>
+    internal const string AcceptEncoding = "gzip, deflate, br, zstd";
+#else
+    /// <summary>What HttpClient decodes: zstd, which Chrome and Firefox announce too, it decodes from .NET 11 on.</summary>
     internal const string AcceptEncoding = "gzip, deflate, br";
+#endif
 
     internal static Agent Parse(string? userAgent)
     {

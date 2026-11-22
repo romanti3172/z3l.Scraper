@@ -12,7 +12,7 @@
   <PropertyGroup Label="Package">
     <PackageId>z3l.Scraper.RabbitMQ</PackageId>
     <Description>Remote page loaders for z3l.Scraper through RabbitMQ: the scraper sends every page to a queue of loader workers (plain HTTP, a headless browser) and handles what comes back; lost loads are found with timesync markers, not with timeouts, so a queue can be of any length.</Description>
-    <PackageTags>scraper;web-scraping;crawler;rabbitmq;distributed;queue;proxy;dotnet;net9;net10</PackageTags>
+    <PackageTags>scraper;web-scraping;crawler;rabbitmq;distributed;queue;proxy;dotnet;net9;net10;net11</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>

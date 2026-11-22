@@ -22,8 +22,9 @@ jobs:
           dotnet-version: |
             9.0.x
             10.0.x
+            11.0.x
 
-      # CI=true makes the tests run on net9.0 and net10.0
+      # CI=true makes the tests run on net9.0, net10.0 and net11.0
       - name: Build
         run: dotnet build -c Release
 
@@ -69,22 +70,34 @@ jobs:
           dotnet-version: |
             9.0.x
             10.0.x
+            11.0.x
 
       - name: Test
         run: dotnet test tests/z3l.Scraper.RabbitMQ.Tests -c Release
 
   aot:
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [net9.0, net10.0, net11.0]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            9.0.x
+            10.0.x
+            11.0.x
 
-      - name: Native AOT publish of the sample, failing on any trim or AOT warning
+      # the sample targets net10.0, the LTS; -f cannot change the framework of a project with one (its restore does not see
+      # it), so the job writes the framework into the project
+      - name: Native AOT publish of the sample on ${{ matrix.framework }}, failing on any trim or AOT warning
         shell: bash
         run: |
+          sed -i 's|<TargetFramework>net10.0</TargetFramework>|<TargetFramework>${{ matrix.framework }}</TargetFramework>|' samples/QuickStart/QuickStart.csproj
+          grep -q "<TargetFramework>${{ matrix.framework }}</TargetFramework>" samples/QuickStart/QuickStart.csproj
           dotnet publish samples/QuickStart -c Release -r linux-x64 -p:PublishAot=true -o aot 2>&1 | tee publish.log
           if grep -E "warning IL[0-9]+" publish.log; then exit 1; fi
           test -x aot/QuickStart

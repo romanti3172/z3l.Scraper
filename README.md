@@ -1,6 +1,6 @@
 # z3l.Scraper
 
-Block-aware web scraping engine for .NET 9 and .NET 10.
+Block-aware web scraping engine for .NET 9, .NET 10 and .NET 11.
 
 You write what to take from a page; the scraper takes care of the rest: a request queue with priorities and
 de-duplication, parallel loading, retries with backoff, recognising blocked, missing and cut-off pages,
