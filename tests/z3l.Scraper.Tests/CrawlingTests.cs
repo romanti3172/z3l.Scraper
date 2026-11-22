@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using z3l.FastHtmlParser;
 
 namespace z3l.Scraper.Tests;
@@ -137,33 +138,50 @@ public sealed class CrawlingTests
     // ------------------------------------------------------------------ throttling
 
     /// <summary>
-    /// a.test answers 429 to its first request; b.test is always fine, each page taking <paramref name="bLoadMs"/>.
-    /// Records when each page was loaded.
+    /// The clock the throttle spaces the loads by. A loader is called after the throttle let its load go, and a thread held up on the
+    /// way makes that load look late and the gap after it short: a gap is measured from a time that came before the throttle let the
+    /// first load go, so a late thread can only make it look longer.
     /// </summary>
-    private static DelegateLoader TwoHosts(ConcurrentQueue<(string Url, DateTime At)> loads, string? retryAfter = null, int bLoadMs = 0)
+    private static readonly Stopwatch Clock = Stopwatch.StartNew();
+
+    /// <summary>A load of <see cref="TwoHosts"/>: when the loader was called and when it answered, by <see cref="Clock"/>.</summary>
+    private readonly record struct Load(string Url, TimeSpan Start, TimeSpan End);
+
+    /// <summary>
+    /// a.test answers 429 to its first request; b.test is always fine, each page taking <paramref name="bLoadMs"/>.
+    /// Records each load.
+    /// </summary>
+    private static DelegateLoader TwoHosts(ConcurrentQueue<Load> loads, string? retryAfter = null, int bLoadMs = 0)
     {
         var first = 0;
         return new DelegateLoader(async (r, token) =>
         {
-            loads.Enqueue((r.Url, DateTime.UtcNow));
-            if (r.Url.StartsWith("https://a.test") && Interlocked.Exchange(ref first, 1) == 0)
+            var start = Clock.Elapsed;
+            try
             {
-                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                if (retryAfter != null) headers["Retry-After"] = retryAfter;
-                return PageResponse.FromText(429, r.Url, "slow down", headers: headers);
+                if (r.Url.StartsWith("https://a.test") && Interlocked.Exchange(ref first, 1) == 0)
+                {
+                    var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (retryAfter != null) headers["Retry-After"] = retryAfter;
+                    return PageResponse.FromText(429, r.Url, "slow down", headers: headers);
+                }
+                if (bLoadMs > 0 && r.Url.StartsWith("https://b.test")) await Task.Delay(bLoadMs, token);
+                return PageResponse.FromText(200, r.Url, ScraperTests.Html("ok"));
             }
-            if (bLoadMs > 0 && r.Url.StartsWith("https://b.test")) await Task.Delay(bLoadMs, token);
-            return PageResponse.FromText(200, r.Url, ScraperTests.Html("ok"));
+            finally
+            {
+                loads.Enqueue(new Load(r.Url, start, Clock.Elapsed));
+            }
         });
     }
 
-    private static DateTime[] LoadsOf(ConcurrentQueue<(string Url, DateTime At)> loads, string host) =>
-        loads.Where(l => l.Url.StartsWith($"https://{host}/")).Select(l => l.At).Order().ToArray();
+    private static Load[] LoadsOf(ConcurrentQueue<Load> loads, string host) =>
+        loads.Where(l => l.Url.StartsWith($"https://{host}/")).OrderBy(l => l.Start).ToArray();
 
     [TestMethod]
     public async Task AutoThrottle_SpacesTheOverloadedHost_OtherHostsKeepFullSpeed()
     {
-        var loads = new ConcurrentQueue<(string Url, DateTime At)>();
+        var loads = new ConcurrentQueue<Load>();
         var options = ScraperTests.FastOptions();
         options.AutoThrottle = true;
         options.MaxConcurrency = 4;
@@ -184,21 +202,27 @@ public sealed class CrawlingTests
         var a = LoadsOf(loads, "a.test");
         var b = LoadsOf(loads, "b.test");
         Assert.HasCount(6, a);          // 5 pages + the retry of the 429
-        // after the 429 every load of a.test is about 300 ms after the one before (the delay shrinks by 10 % per success)
+        // after the 429 the retry waits out the pause of 300 ms, and each load of a.test after it the delay the host had when the
+        // one before started, 300 ms shrinking by 10 % per success. Each load is measured from the answer of the 429, which the
+        // throttle heard of only after it
+        var least = TimeSpan.FromMilliseconds(300);
+        var delay = least;
         for (var i = 1; i < a.Length; i++)
         {
-            Assert.IsGreaterThanOrEqualTo(150, (a[i] - a[i - 1]).TotalMilliseconds, $"a.test load {i} came too soon");
+            Assert.IsGreaterThanOrEqualTo(least.TotalMilliseconds, (a[i].Start - a[0].End).TotalMilliseconds, $"a.test load {i} came too soon");
+            least += delay;
+            delay *= 0.9;
         }
         // b.test was not held back: it was done long before a.test
-        Assert.IsLessThan(a[^1], b[^1]);
-        Assert.IsGreaterThan(500, (a[^1] - b[^1]).TotalMilliseconds);
+        Assert.IsLessThan(a[^1].Start, b[^1].Start);
+        Assert.IsGreaterThan(500, (a[^1].Start - b[^1].Start).TotalMilliseconds);
     }
 
     [TestMethod]
     public async Task AutoThrottle_WorkersBusyWithOtherHosts_LoadsStaySpaced()
     {
         // one worker and slow b.test pages queued after a.test: the slots of a.test come while the worker loads b.test
-        var loads = new ConcurrentQueue<(string Url, DateTime At)>();
+        var loads = new ConcurrentQueue<Load>();
         var options = ScraperTests.FastOptions();
         options.AutoThrottle = true;
         options.MaxConcurrency = 1;
@@ -207,26 +231,32 @@ public sealed class CrawlingTests
 
         var requests = Enumerable.Range(0, 4).Select(i => (ScrapeRequest)$"https://a.test/{i}")
             .Concat(Enumerable.Range(0, 8).Select(i => (ScrapeRequest)$"https://b.test/{i}"));
+        var started = Clock.Elapsed;
         var result = await scraper.RunToListAsync(requests);
 
         Assert.AreEqual(12, result.Stats.Succeeded);
+        var all = loads.OrderBy(l => l.Start).ToArray();       // one worker: one load after the other
         var a = LoadsOf(loads, "a.test");
         var b = LoadsOf(loads, "b.test");
         Assert.HasCount(5, a);          // 4 pages + the retry of the 429
-        // a slot that comes while the worker is busy waits for it, and the next slot counts from that load:
-        // the pages of a.test do not come in a burst when the worker gets free
+        // a slot that comes while the worker is busy waits for it, and the next slot counts from that load: the pages of a.test do
+        // not come in a burst when the worker gets free. The worker takes a request only when it is done with the one before, so
+        // each load of a.test is measured from the end of the load before the previous one of a.test (the start of the run for
+        // the first): the throttle let that previous one go only after it
         for (var i = 1; i < a.Length; i++)
         {
-            Assert.IsGreaterThanOrEqualTo(100, (a[i] - a[i - 1]).TotalMilliseconds, $"a.test load {i} came too soon");
+            var previous = Array.IndexOf(all, a[i - 1]);
+            var from = previous > 0 ? all[previous - 1].End : started;
+            Assert.IsGreaterThanOrEqualTo(100, (a[i].Start - from).TotalMilliseconds, $"a.test load {i} came too soon");
         }
         // and a slot goes to the next free worker, not to the end of the queue behind the waiting b.test pages
-        Assert.IsLessThan(b[^1], a[3]);
+        Assert.IsLessThan(b[^1].Start, a[3].Start);
     }
 
     [TestMethod]
     public async Task RetryAfter_PausesTheWholeHost()
     {
-        var loads = new ConcurrentQueue<(string Url, DateTime At)>();
+        var loads = new ConcurrentQueue<Load>();
         var options = ScraperTests.FastOptions();
         options.AutoThrottle = true;
         options.MaxConcurrency = 1;
@@ -236,7 +266,7 @@ public sealed class CrawlingTests
         var result = await scraper.RunToListAsync(Enumerable.Range(0, 3).Select(i => (ScrapeRequest)$"https://a.test/{i}"));
 
         Assert.AreEqual(3, result.Stats.Succeeded);
-        var times = loads.Select(l => l.At).Order().ToArray();
+        var times = loads.Select(l => l.Start).Order().ToArray();
         // every load after the 429 waited for the pause, not only the retried page
         Assert.IsTrue(times.Skip(1).All(t => (t - times[0]).TotalMilliseconds >= 900), string.Join(", ", times.Select(t => (t - times[0]).TotalMilliseconds)));
     }
@@ -244,7 +274,7 @@ public sealed class CrawlingTests
     [TestMethod]
     public async Task AutoThrottleIsOffByDefault_DoesNotSlowDown()
     {
-        var loads = new ConcurrentQueue<(string Url, DateTime At)>();
+        var loads = new ConcurrentQueue<Load>();
         var options = ScraperTests.FastOptions();
         Assert.IsFalse(options.AutoThrottle);
         options.MaxThrottleDelay = TimeSpan.FromSeconds(5);

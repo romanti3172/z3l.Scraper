@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using z3l.Scraper.Loading;
 
@@ -8,12 +9,19 @@ namespace z3l.Scraper.Tests;
 [TestClass]
 public sealed class HostLimitTests
 {
+    /// <summary>
+    /// The clock the throttle spaces the loads by. A loader is called after the throttle let its load go, and a thread held up on the
+    /// way makes that load look late and the gap after it short: a gap is measured from a time that came before the throttle let the
+    /// first load go, so a late thread can only make it look longer.
+    /// </summary>
+    private static readonly Stopwatch Clock = Stopwatch.StartNew();
+
     /// <summary>Records when each load started and how many loads of each host went at once; each load takes <paramref name="loadMs"/>.</summary>
     private sealed class Site(int loadMs, Func<ScrapeRequest, Task>? before = null)
     {
         private readonly ConcurrentDictionary<string, int> _active = new();
         public readonly ConcurrentDictionary<string, int> MaxActive = new();
-        public readonly ConcurrentQueue<(string Url, DateTime At)> Loads = new();
+        public readonly ConcurrentQueue<(string Url, TimeSpan At)> Loads = new();
         private int _total;
         public int MaxTotal;
 
@@ -22,7 +30,7 @@ public sealed class HostLimitTests
         public async Task<PageResponse> LoadAsync(ScrapeRequest request, CancellationToken token)
         {
             var host = new Uri(request.Url).Host;
-            Loads.Enqueue((request.Url, DateTime.UtcNow));
+            Loads.Enqueue((request.Url, Clock.Elapsed));
             var active = _active.AddOrUpdate(host, 1, (_, n) => n + 1);
             MaxActive.AddOrUpdate(host, active, (_, n) => Math.Max(n, active));
             var total = Interlocked.Increment(ref _total);
@@ -40,7 +48,7 @@ public sealed class HostLimitTests
             }
         }
 
-        public DateTime[] LoadsOf(string host) => [.. Loads.Where(l => new Uri(l.Url).Host == host).Select(l => l.At).Order()];
+        public TimeSpan[] LoadsOf(string host) => [.. Loads.Where(l => new Uri(l.Url).Host == host).Select(l => l.At).Order()];
     }
 
     private static IEnumerable<ScrapeRequest> Pages(string host, int count, ScrapePriority priority = ScrapePriority.Normal) =>
@@ -184,13 +192,14 @@ public sealed class HostLimitTests
     public async Task MaxConcurrencyPerHost_WithAutoThrottle_TheOverloadedHostIsSpaced_AndFinishes()
     {
         var first = 0;
+        var answered429 = TimeSpan.Zero;
         var site = new Site(loadMs: 20);
         var loader = new DelegateLoader(async (r, token) =>
         {
             var response = await site.LoadAsync(r, token);
-            return r.Url.StartsWith("https://a.test/") && Interlocked.Exchange(ref first, 1) == 0
-                ? PageResponse.FromText(429, r.Url, "slow down")
-                : response;
+            if (!r.Url.StartsWith("https://a.test/") || Interlocked.Exchange(ref first, 1) != 0) return response;
+            answered429 = Clock.Elapsed;
+            return PageResponse.FromText(429, r.Url, "slow down");
         });
         var options = ScraperTests.FastOptions();
         options.AutoThrottle = true;
@@ -206,10 +215,16 @@ public sealed class HostLimitTests
         Assert.AreEqual(7, result.Stats.Succeeded);
         var a = site.LoadsOf("a.test");
         Assert.HasCount(8, a);          // 7 pages and the retry of the 429
-        // after the 429 the loads of a.test are spaced (the delay shrinks by 10 % per success), not three at a time
-        for (var i = 2; i < a.Length; i++)
+        // after the 429 the loads of a.test are spaced, not three at a time: the retry waits out the pause of 200 ms, and each load
+        // after it the delay the host had when the one before started, 200 ms shrinking by 10 % per success. Each load is measured
+        // from the answer of the 429, which the throttle heard of only after it
+        var least = TimeSpan.FromMilliseconds(200);
+        var delay = least;
+        for (var i = 1; i < a.Length; i++)
         {
-            Assert.IsGreaterThanOrEqualTo(100, (a[i] - a[i - 1]).TotalMilliseconds, $"a.test load {i} came too soon");
+            Assert.IsGreaterThanOrEqualTo(least.TotalMilliseconds, (a[i] - answered429).TotalMilliseconds, $"a.test load {i} came too soon");
+            least += delay;
+            delay *= 0.9;
         }
     }
 
@@ -219,22 +234,44 @@ public sealed class HostLimitTests
     [Timeout(20_000, CooperativeCancellation = true)]
     public async Task HostDelay_SpacesTheLoadsOfEachHost_EachHostByItself()
     {
-        var site = new Site(loadMs: 0);
-        var options = ScraperTests.FastOptions();
-        options.HostDelay = TimeSpan.FromMilliseconds(100);
-        var scraper = new Scraper(site.Loader, options).Route("default", _ => { });
-
-        var result = await scraper.RunToListAsync(Pages("a.test", 4).Concat(Pages("b.test", 4)));
-
-        Assert.AreEqual(8, result.Stats.Succeeded);
-        var a = site.LoadsOf("a.test");
-        var b = site.LoadsOf("b.test");
-        for (var i = 1; i < 4; i++)
+        // the throttle is driven as a run drives it: Enter for each request, and again, with its slot, for each one a line hands back.
+        // A loader would time a load after the throttle let it go, as late as the thread got there; each start is timed just before
+        // Enter and just after it instead, and a gap runs from the "before" of one start to the "after" of the next: a late thread
+        // can only make it longer
+        var starts = new ConcurrentQueue<(string Host, TimeSpan Before, TimeSpan After)>();
+        var allStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        HostThrottle throttle = null!;
+        bool Enter(ScrapeRequest request)
         {
-            Assert.IsGreaterThanOrEqualTo(90, (a[i] - a[i - 1]).TotalMilliseconds, $"a.test load {i} came too soon");
-            Assert.IsGreaterThanOrEqualTo(90, (b[i] - b[i - 1]).TotalMilliseconds, $"b.test load {i} came too soon");
+            var host = new Uri(request.Url).Host;
+            var before = Clock.Elapsed;
+            if (!throttle.Enter(host, request)) return false;
+            starts.Enqueue((host, before, Clock.Elapsed));
+            throttle.Exit(host);        // the load is over at once
+            if (starts.Count == 8) allStarted.TrySetResult();
+            return true;
         }
-        Assert.IsLessThan(80, Math.Abs((b[0] - a[0]).TotalMilliseconds), "b.test does not wait for the delay of a.test");
+        var options = new ScraperOptions { HostDelay = TimeSpan.FromMilliseconds(100) };
+        throttle = new HostThrottle(options, new ScraperStats(), request =>
+        {
+            if (!Enter(request)) allStarted.TrySetException(new AssertFailedException($"{request.Url} came back from its line without its slot"));
+        }, NullLogger.Instance, CancellationToken.None);
+
+        // the first request of each host goes at once and the others wait in its line; that of b.test goes while those of a.test wait
+        var goes = Pages("a.test", 4).Concat(Pages("b.test", 4)).Select(Enter).ToArray();
+        Assert.IsTrue(goes[0]);
+        Assert.IsTrue(goes[4], "b.test does not wait for the delay of a.test");
+        await allStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        foreach (var host in new[] { "a.test", "b.test" })
+        {
+            var times = starts.Where(s => s.Host == host).OrderBy(s => s.Before).ToArray();
+            Assert.HasCount(4, times);
+            for (var i = 1; i < times.Length; i++)
+            {
+                Assert.IsGreaterThanOrEqualTo(100, (times[i].After - times[i - 1].Before).TotalMilliseconds, $"{host} load {i} came too soon");
+            }
+        }
     }
 
     [TestMethod]
@@ -243,11 +280,16 @@ public sealed class HostLimitTests
     [Timeout(20_000, CooperativeCancellation = true)]
     public async Task HostDelay_AndCrawlDelay_TheLongerWins(int hostDelayMs, string crawlDelay)
     {
-        var loads = new ConcurrentQueue<DateTime>();
+        var loads = new ConcurrentQueue<TimeSpan>();
+        var robotsAnswered = TimeSpan.Zero;
         var loader = new DelegateLoader((r, _) =>
         {
-            if (r.Url.EndsWith("/robots.txt")) return Task.FromResult(PageResponse.FromText(200, r.Url, $"User-agent: *\nCrawl-delay: {crawlDelay}", "text/plain"));
-            loads.Enqueue(DateTime.UtcNow);
+            if (r.Url.EndsWith("/robots.txt"))
+            {
+                robotsAnswered = Clock.Elapsed;
+                return Task.FromResult(PageResponse.FromText(200, r.Url, $"User-agent: *\nCrawl-delay: {crawlDelay}", "text/plain"));
+            }
+            loads.Enqueue(Clock.Elapsed);
             return Task.FromResult(PageResponse.FromText(200, r.Url, ScraperTests.Html("ok")));
         });
         var options = ScraperTests.FastOptions();
@@ -259,8 +301,13 @@ public sealed class HostLimitTests
         var result = await scraper.RunToListAsync(Pages("s.test", 3));
 
         Assert.AreEqual(3, result.Stats.Succeeded);
+        // each load waits at least 250 ms after the one before; each is measured from the answer of robots.txt, before which the
+        // throttle let none go
         var times = loads.Order().ToArray();
-        for (var i = 1; i < times.Length; i++) Assert.IsGreaterThanOrEqualTo(235, (times[i] - times[i - 1]).TotalMilliseconds, $"load {i} came too soon");
+        for (var i = 1; i < times.Length; i++)
+        {
+            Assert.IsGreaterThanOrEqualTo(250.0 * i, (times[i] - robotsAnswered).TotalMilliseconds, $"load {i} came too soon");
+        }
     }
 
     [TestMethod]
