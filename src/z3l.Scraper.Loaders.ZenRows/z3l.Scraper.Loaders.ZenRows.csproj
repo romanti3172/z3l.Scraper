@@ -12,7 +12,7 @@
   <PropertyGroup Label="Package">
     <PackageId>z3l.Scraper.Loaders.ZenRows</PackageId>
     <Description>A page loader for z3l.Scraper through the ZenRows Fetch API (formerly the Universal Scraper API): its proxies, browsers and anti-bot handling, called a page at a time within the plan's limit; a page that comes back blocked is loaded again with premium proxies or a browser.</Description>
-    <PackageTags>scraper;web-scraping;crawler;zenrows;scraping-api;proxy;dotnet;net10;net11</PackageTags>
+    <PackageTags>scraper;web-scraping;crawler;zenrows;scraping-api;proxy;dotnet;net9;net10;net11</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>

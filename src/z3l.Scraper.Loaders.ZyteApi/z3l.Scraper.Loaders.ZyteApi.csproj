@@ -14,7 +14,7 @@
   <PropertyGroup Label="Package">
     <PackageId>z3l.Scraper.Loaders.ZyteApi</PackageId>
     <Description>A page loader for z3l.Scraper through Zyte API: its ban handling, proxies and browsers, called a page at a time within the plan's limit; a page that comes back blocked, or that Zyte API could not get past a ban, is loaded again in a browser.</Description>
-    <PackageTags>scraper;web-scraping;crawler;zyte;zyte-api;scraping-api;proxy;headless-browser;dotnet;net10;net11</PackageTags>
+    <PackageTags>scraper;web-scraping;crawler;zyte;zyte-api;scraping-api;proxy;headless-browser;dotnet;net9;net10;net11</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
