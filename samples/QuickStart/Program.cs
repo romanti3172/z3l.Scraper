@@ -11,7 +11,7 @@ using var loggerFactory = LoggerFactory.Create(b => b
     .SetMinimumLevel(LogLevel.Debug));
 
 var maxListPages = args.Length > 0 && int.TryParse(args[0], out var pages) ? pages : 2;
-var proxies = args.Length > 1 ? ProxyList.FromFile(args[1], ProxyBlockPolicy.Block1Hour, loggerFactory.CreateLogger("proxies")) : null;
+var proxies = args.Length > 1 ? ProxyList.FromFile(args[1], BlockPolicy.Block1Hour, loggerFactory.CreateLogger("proxies")) : null;
 
 using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
 

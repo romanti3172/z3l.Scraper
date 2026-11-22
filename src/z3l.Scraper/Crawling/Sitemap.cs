@@ -6,9 +6,14 @@ using z3l.FastHtmlParser;
 namespace z3l.Scraper.Crawling;
 
 /// <summary>A page a sitemap lists.</summary>
-/// <param name="Url">The &lt;loc&gt; URL.</param>
-/// <param name="LastModified">The &lt;lastmod&gt; date, if the sitemap gives one.</param>
-public sealed record SitemapUrl(string Url, DateTimeOffset? LastModified);
+public sealed record SitemapUrl
+{
+    /// <summary>The &lt;loc&gt; URL.</summary>
+    public required string Url { get; init; }
+
+    /// <summary>The &lt;lastmod&gt; date, if the sitemap gives one.</summary>
+    public DateTimeOffset? LastModified { get; init; }
+}
 
 /// <summary>
 /// A parsed sitemap: the pages of a &lt;urlset&gt;, the nested sitemaps of a &lt;sitemapindex&gt;, or the lines of a text sitemap.
@@ -54,7 +59,7 @@ public sealed class Sitemap
         {
             foreach (var line in text.Split('\n'))
             {
-                if (Location(line, url) is { } location) urls.Add(new SitemapUrl(location, null));
+                if (Location(line, url) is { } location) urls.Add(new SitemapUrl { Url = location });
             }
             return new Sitemap(urls, sitemaps);
         }
@@ -64,7 +69,7 @@ public sealed class Sitemap
         {
             if (Location(entry.Find("loc"), url) is { } location)
             {
-                urls.Add(new SitemapUrl(location, Date(entry.Find("lastmod").Text())));
+                urls.Add(new SitemapUrl { Url = location, LastModified = Date(entry.Find("lastmod").Text()) });
             }
         }
         foreach (var entry in document.FindAll("sitemap"))

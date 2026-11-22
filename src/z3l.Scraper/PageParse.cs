@@ -69,7 +69,7 @@ internal sealed class PageParse : IScrapeHost
 
         response ??= await LoadAsync(scraper, request, token).ConfigureAwait(false);
         var verdict = ResponseValidator.Validate(request, response, scraper.Options.Rules.Build(request.Label));
-        if (verdict.Outcome != ValidationOutcome.Ok) return new ParseResult(request, response, verdict, [], [], null);
+        if (verdict.Outcome != ValidationOutcome.Ok) return new ParseResult { Request = request, Response = response, Validation = verdict, Items = [], Found = [] };
 
         var parse = new PageParse(scraper, request, scope);
         var context = new ScrapeContext(parse, request, response, token);
@@ -87,7 +87,7 @@ internal sealed class PageParse : IScrapeHost
         {
             items = context.Complete();     // the parser is disposed; the page stays in the result
         }
-        return new ParseResult(request, response, verdict, items ?? [], parse.Found, error);
+        return new ParseResult { Request = request, Response = response, Validation = verdict, Items = items ?? [], Found = parse.Found, Exception = error };
     }
 
     /// <summary>One load with the loader of the label, as the first attempt of a run.</summary>

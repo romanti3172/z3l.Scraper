@@ -5,15 +5,29 @@ using z3l.Scraper.Diagnostics;
 namespace z3l.Scraper.Loading;
 
 /// <summary>State of one user agent, for logs and dashboards.</summary>
-/// <param name="UserAgent">The user agent.</param>
-/// <param name="Loads">Loads made with it.</param>
-/// <param name="Successes">Loads that got an answer.</param>
-/// <param name="Blocks">Answers that sites blocked.</param>
-/// <param name="BlockedSites">Sites it rests for now (blocked, or bad responses in a row).</param>
-/// <param name="BadResponses">Answers that were not the page.</param>
-/// <param name="Sessions">Sessions of loaders that use it now.</param>
-public sealed record UserAgentStatus(string UserAgent, long Loads, long Successes, long Blocks, int BlockedSites,
-    long BadResponses, int Sessions);
+public sealed record UserAgentStatus
+{
+    /// <summary>The user agent.</summary>
+    public required string UserAgent { get; init; }
+
+    /// <summary>Loads made with it.</summary>
+    public required long Loads { get; init; }
+
+    /// <summary>Loads that got an answer.</summary>
+    public required long Successes { get; init; }
+
+    /// <summary>Answers that sites blocked.</summary>
+    public required long Blocks { get; init; }
+
+    /// <summary>Sites it rests for now (blocked, or bad responses in a row).</summary>
+    public required int BlockedSites { get; init; }
+
+    /// <summary>Answers that were not the page.</summary>
+    public required long BadResponses { get; init; }
+
+    /// <summary>Sessions of loaders that use it now.</summary>
+    public required int Sessions { get; init; }
+}
 
 /// <summary>
 /// User agents for <see cref="HttpPageLoader"/>, given out in turn. From a list, a text file (read again when it changes) or a URL
@@ -25,6 +39,11 @@ public sealed record UserAgentStatus(string UserAgent, long Loads, long Successe
 /// that site for a while. Failures without an answer (no connection, a timeout, 407) are the proxy's, not the user agent's: they are not
 /// counted here. When every user agent rests for a site, a new session takes the one that comes
 /// back first (a load never waits for a user agent). Thread-safe.
+/// </para>
+/// <para>
+/// The settings (<see cref="BlockPolicy"/>, <see cref="MaxConsecutiveBadResponses"/>, <see cref="BadResponsePause"/>,
+/// <see cref="FileCheckInterval"/>) are read each time they are needed: a list from <see cref="FromFile"/> or
+/// <see cref="FromUrlAsync"/> is set after it is made, and a change applies from the next block or check of the file on.
 /// </para>
 /// </summary>
 /// <example>
@@ -109,16 +128,16 @@ public sealed class UserAgentList
     }
 
     /// <summary>What happens to a user agent whose session a site blocked: it rests for that site. An hour by default.</summary>
-    public ProxyBlockPolicy BlockPolicy { get; init; } = ProxyBlockPolicy.Block1Hour;
+    public BlockPolicy BlockPolicy { get; set; } = BlockPolicy.Block1Hour;
 
     /// <summary>Bad responses in a row on a site after which a user agent rests for that site.</summary>
-    public int MaxConsecutiveBadResponses { get; init; } = 3;
+    public int MaxConsecutiveBadResponses { get; set; } = 3;
 
     /// <summary>How long a user agent with bad responses in a row rests for the site, and how long one puts it after the clean ones.</summary>
-    public TimeSpan BadResponsePause { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan BadResponsePause { get; set; } = TimeSpan.FromMinutes(10);
 
-    /// <summary>How often the file is checked for changes.</summary>
-    public TimeSpan FileCheckInterval { get; init; } = TimeSpan.FromSeconds(5);
+    /// <summary>How often the file of <see cref="FromFile"/> is checked for changes.</summary>
+    public TimeSpan FileCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Time source; tests set a manual one before the first call.</summary>
     internal TimeProvider Clock { get; set; } = TimeProvider.System;
@@ -151,8 +170,16 @@ public sealed class UserAgentList
         lock (_lock)
         {
             var now = Clock.GetUtcNow();
-            return [.. _entries.Select(e => new UserAgentStatus(e.UserAgent, e.Health.Loads, e.Health.Successes, e.Health.Blocks,
-                e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
+            return [.. _entries.Select(e => new UserAgentStatus
+            {
+                UserAgent = e.UserAgent,
+                Loads = e.Health.Loads,
+                Successes = e.Health.Successes,
+                Blocks = e.Health.Blocks,
+                BlockedSites = e.Health.CountBlockedSites(now),
+                BadResponses = e.Health.BadResponses,
+                Sessions = e.Health.Sessions,
+            })];
         }
     }
 

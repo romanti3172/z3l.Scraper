@@ -305,7 +305,7 @@ same for alike pages (`"page too short"`, not the length): `Stats.Reasons` group
 ## Proxies
 
 ```csharp
-var proxies = ProxyList.FromFile("proxies.txt", ProxyBlockPolicy.Block1Hour, logger);
+var proxies = ProxyList.FromFile("proxies.txt", BlockPolicy.Block1Hour, logger);
 using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
 ```
 
@@ -350,7 +350,7 @@ A 404, a 429 or a 503 is the site's answer, not the session's fault: the session
 other session uses, the next in turn, and shares one only when every free proxy rests (a rotating gateway behind one
 address is fine).
 
-When a session is thrown away for a block, its proxy rests for that site only, as `ProxyBlockPolicy` says: `Ignore`,
+When a session is thrown away for a block, its proxy rests for that site only, as `BlockPolicy` says: `Ignore`,
 `Block10Minutes`, `Block1Hour` (the default), `Block1Day` or `Remove`.
 
 A failure or a bad response of a session thrown away puts its proxy after the clean ones: a new session takes it only when no clean proxy is free.
@@ -359,7 +359,9 @@ After
 `MaxConsecutiveBadResponses` (3) bad responses in a row on a site it rests for that site for `BadResponsePause` (10 min).
 An error older than its pause is forgotten, a good page starts the count again. Bad responses are counted per site, so a
 broken site does not take the proxies from the others; 429 and 503 are left to the throttling. When every proxy rests for a site, its loads wait for the first one to come back,
-no longer than `RequestTimeout`. The file is read again when it changes; proxies that stay keep their rests.
+no longer than `RequestTimeout`. The file is read again when it changes (checked every `FileCheckInterval`, 5 s); proxies
+that stay keep their rests. The settings of a list from a file or a URL are set after it is made, and a change applies
+from the next block or failure on: `proxies.DeadProxyPause = TimeSpan.FromMinutes(30);`.
 `proxies.Status()` and `proxies.ToString()` show what each proxy did and how many sessions it has now.
 
 The scraper tells the loader what each answer was after its checks and the handler, and the session waits for that before
@@ -410,7 +412,9 @@ what each one did; with `PublishMetrics` they are counted in `z3l.scraper.user_a
 `z3l.scraper.user_agents`.
 
 ```csharp
-var agents = new UserAgentList(File.ReadLines("useragents.txt")) { BlockPolicy = ProxyBlockPolicy.Block10Minutes, BadResponsePause = TimeSpan.FromMinutes(30) };
+var agents = UserAgentList.FromFile("useragents.txt");
+agents.BlockPolicy = BlockPolicy.Block10Minutes;
+agents.BadResponsePause = TimeSpan.FromMinutes(30);
 ```
 
 ## Throttling
@@ -784,7 +788,7 @@ Two helpers for the pages of every loader and label, set on the scraper:
 var scraper = new Scraper(loader, options)
 {
     CachingPageLoader = new CachingPageLoader { Path = "cache" },          // the pages the handlers took, given back next time
-    SnapshotPageLoader = new SnapshotPageLoader { Path = "snapshots" },    // the pages that were not taken, to look at
+    SnapshotStore = new SnapshotStore { Path = "snapshots" },              // the pages that were not taken, to look at
 };
 ```
 
@@ -809,13 +813,13 @@ new CachingPageLoader
 **Snapshots** are the loaded pages that were not taken: blocked, missing, failing the checks, or those whose handler threw,
 one for every such attempt. They go to `{Path}/{label}/{kind}`, the kind being `blocked`, `retry`, `not-found` or
 `handler-error`, two files each: the body and its description (the request, the reason, the status, the headers, what the
-handler threw). A load that brought no page (a network error, a timeout) has no snapshot. `SnapshotPageLoader` takes
+handler threw). A load that brought no page (a network error, a timeout) has no snapshot. `SnapshotStore` takes
 `Labels` and a `Filter` too (`snapshot => snapshot.Kind == SnapshotKind.Blocked`), and `MaxPerKind` (for each label and
 kind) and `MaxSnapshots` limit how many it saves; 0, the default, for no limit. Files of earlier runs stay.
 
 To keep the pages elsewhere, in a database for example, override the storage and keep the labels, the filter and the
 limits of the classes (`ReadAsync`, `WriteAsync`, `DeleteAsync` and `CountStored` of `CachingPageLoader`, `WriteAsync` of
-`SnapshotPageLoader`), or implement `ICachingPageLoader` or `ISnapshotPageLoader` yourself; `CachedPage.From` and
+`SnapshotStore`), or implement `ICachingPageLoader` or `ISnapshotStore` yourself; `CachedPage.From` and
 `ToResponse` turn a response into what to keep and back.
 
 ## Logging

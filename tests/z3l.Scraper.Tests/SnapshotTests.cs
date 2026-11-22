@@ -5,8 +5,8 @@ using z3l.Scraper.Loading;
 
 namespace z3l.Scraper.Tests;
 
-/// <summary>Keeps the snapshots in memory, as a snapshot loader of your own would keep them in a database.</summary>
-internal sealed class MemorySnapshots : ISnapshotPageLoader
+/// <summary>Keeps the snapshots in memory, as a snapshot store of your own would keep them in a database.</summary>
+internal sealed class MemorySnapshots : ISnapshotStore
 {
     public ConcurrentQueue<(SnapshotKind Kind, string Url, int Attempt, string Reason, string Text, bool FromCache, Exception? Exception)> Saved { get; } = new();
 
@@ -35,13 +35,13 @@ public sealed class SnapshotTests
     private static ScrapeRequest[] Products(params string[] names) => [.. names.Select(name => new ScrapeRequest($"https://s.test/p/{name}", PageType.Item))];
 
     /// <summary>A product page needs a price; the handler chokes on "Boom".</summary>
-    private static Scraper TroubleScraper(IPageLoader loader, ISnapshotPageLoader snapshots, int maxRetries = 0)
+    private static Scraper TroubleScraper(IPageLoader loader, ISnapshotStore snapshots, int maxRetries = 0)
     {
         var options = ScraperTests.FastOptions();
         options.MaxRetries = maxRetries;
         options.NotFoundRetries = 0;
         options.Rules[PageType.Item].MustContain.Add("class='price'");
-        return new Scraper(loader, options) { SnapshotPageLoader = snapshots }
+        return new Scraper(loader, options) { SnapshotStore = snapshots }
             .Route(PageType.Item, ctx =>
             {
                 var title = ctx.Html.Find(HtmlTag.H1).Text()!;
@@ -61,7 +61,7 @@ public sealed class SnapshotTests
     {
         using var folder = new TempFolder();
 
-        var result = await TroubleScraper(Troubles(), new SnapshotPageLoader { Path = folder.Path })
+        var result = await TroubleScraper(Troubles(), new SnapshotStore { Path = folder.Path })
             .RunToListAsync(Products("ok", "blocked", "missing", "broken", "boom"));
 
         CollectionAssert.AreEqual(new[] { "Ok" }, result.Items.ToArray());
@@ -77,7 +77,7 @@ public sealed class SnapshotTests
     public async Task Description_TellsWhatHappened()
     {
         using var folder = new TempFolder();
-        await TroubleScraper(Troubles(), new SnapshotPageLoader { Path = folder.Path }).RunToListAsync(Products("boom", "blocked"));
+        await TroubleScraper(Troubles(), new SnapshotStore { Path = folder.Path }).RunToListAsync(Products("boom", "blocked"));
 
         var meta = MetaFiles(folder, "item", "handler-error").Single();
         using (var json = JsonDocument.Parse(File.ReadAllBytes(meta)))
@@ -108,7 +108,7 @@ public sealed class SnapshotTests
     {
         using var folder = new TempFolder();
         var loader = Troubles().Page("https://s.test/list", "<html>captcha</html>", 403);
-        var snapshots = new SnapshotPageLoader { Path = folder.Path, Labels = { PageType.Item }, Filter = snapshot => snapshot.Kind == SnapshotKind.Blocked };
+        var snapshots = new SnapshotStore { Path = folder.Path, Labels = { PageType.Item }, Filter = snapshot => snapshot.Kind == SnapshotKind.Blocked };
         var scraper = TroubleScraper(loader, snapshots).Route(PageType.Listing, _ => { });
         ScrapeRequest[] start = [new("https://s.test/list", PageType.Listing), .. Products("blocked", "missing", "boom")];
 
@@ -128,7 +128,7 @@ public sealed class SnapshotTests
             loader.Page($"https://s.test/p/b{i}", "<html>captcha</html>", 403).Page($"https://s.test/p/m{i}", Html("gone"), 404);
         }
 
-        await TroubleScraper(loader, new SnapshotPageLoader { Path = folder.Path, MaxPerKind = 2, MaxSnapshots = 3 })
+        await TroubleScraper(loader, new SnapshotStore { Path = folder.Path, MaxPerKind = 2, MaxSnapshots = 3 })
             .RunToListAsync(Products("b0", "b1", "b2", "b3", "b4", "m0", "m1", "m2", "m3", "m4"));
 
         var blocked = MetaFiles(folder, "item", "blocked").Length;
@@ -165,7 +165,7 @@ public sealed class SnapshotTests
             (200, Html("<h1>Hidden</h1><span class='price'></span>")),
             (200, Html("<h1>One</h1><span class='price'>1</span>")));
         var snapshots = new MemorySnapshots();
-        var scraper = new Scraper(loader, ScraperTests.FastOptions()) { SnapshotPageLoader = snapshots }
+        var scraper = new Scraper(loader, ScraperTests.FastOptions()) { SnapshotStore = snapshots }
             .Route(PageType.Item, ctx =>
             {
                 var title = ctx.Html.Find(HtmlTag.H1).Text()!;

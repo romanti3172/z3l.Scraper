@@ -5,30 +5,60 @@ using System.Text.Json;
 namespace z3l.Scraper.Loading;
 
 /// <summary>A page kept by <see cref="CachingPageLoader"/>: what it writes and reads back.</summary>
-/// <param name="Key">Key of the request: <see cref="ScrapeRequest.UniqueKey"/>, or the method, the URL and the body, as for duplicates.</param>
-/// <param name="Label">Label of the request that loaded the page.</param>
-/// <param name="RequestUrl">URL of that request.</param>
-/// <param name="StatusCode">HTTP status code.</param>
-/// <param name="Url">Final URL after redirects.</param>
-/// <param name="ContentType">Content-Type header.</param>
-/// <param name="Headers">Response headers.</param>
-/// <param name="Body">Response body.</param>
-/// <param name="IsText">
-/// The body is the text of the page in UTF-8, whatever <paramref name="ContentType"/> says: a page drawn by a browser
-/// (<see cref="PageResponse.FromText"/>).
-/// </param>
-/// <param name="SavedAt">When the page was kept.</param>
-public sealed record CachedPage(string Key, string Label, string RequestUrl, int StatusCode, string Url, string? ContentType,
-    IReadOnlyDictionary<string, string> Headers, byte[] Body, bool IsText, DateTimeOffset SavedAt)
+public sealed record CachedPage
 {
+    /// <summary>Key of the request: <see cref="ScrapeRequest.UniqueKey"/>, or the method, the URL and the body, as for duplicates.</summary>
+    public required string Key { get; init; }
+
+    /// <summary>Label of the request that loaded the page.</summary>
+    public required string Label { get; init; }
+
+    /// <summary>URL of that request.</summary>
+    public required string RequestUrl { get; init; }
+
+    /// <summary>HTTP status code.</summary>
+    public required int StatusCode { get; init; }
+
+    /// <summary>Final URL after redirects.</summary>
+    public required string Url { get; init; }
+
+    /// <summary>Content-Type header.</summary>
+    public string? ContentType { get; init; }
+
+    /// <summary>Response headers.</summary>
+    public required IReadOnlyDictionary<string, string> Headers { get; init; }
+
+    /// <summary>Response body.</summary>
+    public required byte[] Body { get; init; }
+
+    /// <summary>
+    /// The body is the text of the page in UTF-8, whatever <see cref="ContentType"/> says: a page drawn by a browser
+    /// (<see cref="PageResponse.FromText"/>).
+    /// </summary>
+    public required bool IsText { get; init; }
+
+    /// <summary>When the page was kept.</summary>
+    public required DateTimeOffset SavedAt { get; init; }
+
     /// <summary>Takes what is needed from a response, which may be let go afterwards.</summary>
     public static CachedPage From(string key, ScrapeRequest request, PageResponse response, DateTimeOffset savedAt)
     {
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(response);
-        return new CachedPage(key, request.Label, request.Url, response.StatusCode, response.Url, response.ContentType,
-            new Dictionary<string, string>(response.Headers, StringComparer.OrdinalIgnoreCase), response.Body, response.MadeFromText, savedAt);
+        return new CachedPage
+        {
+            Key = key,
+            Label = request.Label,
+            RequestUrl = request.Url,
+            StatusCode = response.StatusCode,
+            Url = response.Url,
+            ContentType = response.ContentType,
+            Headers = new Dictionary<string, string>(response.Headers, StringComparer.OrdinalIgnoreCase),
+            Body = response.Body,
+            IsText = response.MadeFromText,
+            SavedAt = savedAt,
+        };
     }
 
     /// <summary>The page as a response, the same as it was loaded.</summary>
@@ -301,8 +331,19 @@ public class CachingPageLoader : ICachingPageLoader
         }
 
         var isText = root.TryGetProperty("isText", out var text) && text.ValueKind == JsonValueKind.True;
-        var page = new CachedPage(key, StringOf(root, "label") ?? ScrapeRequest.DefaultLabel, StringOf(root, "requestUrl") ?? url, statusCode,
-            url, StringOf(root, "contentType"), PageFiles.ReadHeaders(root), [], isText, savedAt);
+        var page = new CachedPage
+        {
+            Key = key,
+            Label = StringOf(root, "label") ?? ScrapeRequest.DefaultLabel,
+            RequestUrl = StringOf(root, "requestUrl") ?? url,
+            StatusCode = statusCode,
+            Url = url,
+            ContentType = StringOf(root, "contentType"),
+            Headers = PageFiles.ReadHeaders(root),
+            Body = [],
+            IsText = isText,
+            SavedAt = savedAt,
+        };
         return new Description(page, bodyFile);
     }
 

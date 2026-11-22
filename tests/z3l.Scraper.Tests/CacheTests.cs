@@ -199,7 +199,7 @@ public sealed class CacheTests
         var scraper = new Scraper(loader, options)
             {
                 CachingPageLoader = new CachingPageLoader { Path = folder.Path },
-                SnapshotPageLoader = snapshots,
+                SnapshotStore = snapshots,
             }
             .Route(PageType.Listing, ctx => ctx.Enqueue(ctx.Html.XPathValues("//a[@class='p']/@href"), PageType.Item))
             .Route(PageType.Item, ctx =>
@@ -353,7 +353,7 @@ public sealed class CacheTests
         await foreach (var _ in scraper.RunAsync(List()))
         {
             Assert.ThrowsExactly<InvalidOperationException>(() => { scraper.CachingPageLoader = new CachingPageLoader { Path = "cache" }; });
-            Assert.ThrowsExactly<InvalidOperationException>(() => { scraper.SnapshotPageLoader = new SnapshotPageLoader { Path = "snapshots" }; });
+            Assert.ThrowsExactly<InvalidOperationException>(() => { scraper.SnapshotStore = new SnapshotStore { Path = "snapshots" }; });
             break;
         }
     }

@@ -28,7 +28,7 @@ public sealed class ProxyTests
         public override DateTimeOffset GetUtcNow() => Now;
     }
 
-    private static ProxyList List(ProxyBlockPolicy policy, ManualClock clock, params string[] lines) => new(lines, policy) { Clock = clock };
+    private static ProxyList List(BlockPolicy policy, ManualClock clock, params string[] lines) => new(lines, policy) { Clock = clock };
 
     private static async Task<string> Next(ProxyList list, string site = Site) => (await list.AcquireAsync(site, CancellationToken.None)).Address.Host;
 
@@ -103,7 +103,7 @@ public sealed class ProxyTests
     [TestMethod]
     public async Task ProxiesGoInTurn()
     {
-        var list = List(ProxyBlockPolicy.Block1Hour, new ManualClock(), "a.test:1", "b.test:1", "c.test:1");
+        var list = List(BlockPolicy.Block1Hour, new ManualClock(), "a.test:1", "b.test:1", "c.test:1");
 
         var order = new List<string>();
         for (var i = 0; i < 6; i++) order.Add(await Next(list));
@@ -112,10 +112,10 @@ public sealed class ProxyTests
     }
 
     [TestMethod]
-    [DataRow(ProxyBlockPolicy.Block10Minutes, 9, 11)]
-    [DataRow(ProxyBlockPolicy.Block1Hour, 59, 61)]
-    [DataRow(ProxyBlockPolicy.Block1Day, 23 * 60, 25 * 60)]
-    public async Task BlockedProxy_RestsForThatSiteOnly_ForThePolicyTime(ProxyBlockPolicy policy, int stillBlockedMinutes, int freeMinutes)
+    [DataRow(BlockPolicy.Block10Minutes, 9, 11)]
+    [DataRow(BlockPolicy.Block1Hour, 59, 61)]
+    [DataRow(BlockPolicy.Block1Day, 23 * 60, 25 * 60)]
+    public async Task BlockedProxy_RestsForThatSiteOnly_ForThePolicyTime(BlockPolicy policy, int stillBlockedMinutes, int freeMinutes)
     {
         var clock = new ManualClock();
         var start = clock.Now;
@@ -139,14 +139,14 @@ public sealed class ProxyTests
     public async Task RemovePolicy_NeverComesBack_IgnorePolicy_NeverRests()
     {
         var clock = new ManualClock();
-        var removed = List(ProxyBlockPolicy.Remove, clock, "a.test:1", "b.test:1");
+        var removed = List(BlockPolicy.Remove, clock, "a.test:1", "b.test:1");
         var a = await removed.AcquireAsync(Site, CancellationToken.None);
         removed.ReportBlocked(a, Site);
         clock.Now = clock.Now.AddDays(30);
         Assert.AreEqual("b.test", await Next(removed));
         Assert.AreEqual("b.test", await Next(removed));
 
-        var ignored = List(ProxyBlockPolicy.Ignore, clock, "a.test:1", "b.test:1");
+        var ignored = List(BlockPolicy.Ignore, clock, "a.test:1", "b.test:1");
         var first = await ignored.AcquireAsync(Site, CancellationToken.None);
         ignored.ReportBlocked(first, Site);
         Assert.AreEqual("b.test", await Next(ignored));
@@ -243,7 +243,7 @@ public sealed class ProxyTests
     public async Task BadResponses_DoNotShortenALongerBlock()
     {
         var clock = new ManualClock();
-        var list = new ProxyList(["a.test:1", "b.test:1"], ProxyBlockPolicy.Block1Day) { Clock = clock, MaxConsecutiveBadResponses = 1 };
+        var list = new ProxyList(["a.test:1", "b.test:1"], BlockPolicy.Block1Day) { Clock = clock, MaxConsecutiveBadResponses = 1 };
         var a = await list.AcquireAsync(Site, CancellationToken.None);
         list.ReportBlocked(a, Site);
         list.ReportBadResponse(a, Site, "no marker");
@@ -280,7 +280,7 @@ public sealed class ProxyTests
     [TestMethod]
     public async Task EveryProxyRemovedForASite_FailsAtOnce()
     {
-        var list = new ProxyList(["a.test:1"], ProxyBlockPolicy.Remove);
+        var list = new ProxyList(["a.test:1"], BlockPolicy.Remove);
         list.ReportBlocked(await list.AcquireAsync(Site, CancellationToken.None), Site);
 
         await Assert.ThrowsExactlyAsync<NonRetryableException>(() => list.AcquireAsync(Site, CancellationToken.None));
@@ -310,6 +310,42 @@ public sealed class ProxyTests
             Assert.AreEqual("c.test", await Next(list));     // b is gone, a still rests for shop.test
             Assert.AreEqual("c.test", await Next(list));
             Assert.AreEqual(2, list.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
+    public async Task File_SettingsOfAListFromAFile_ApplyWhenSetAfterIt()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"z3l-proxies-{Guid.NewGuid():N}.txt");
+        try
+        {
+            await File.WriteAllLinesAsync(path, ["a.test:1", "b.test:1"]);
+            var clock = new ManualClock();
+            var start = clock.Now;
+            var list = ProxyList.FromFile(path);
+            list.Clock = clock;
+            list.BlockPolicy = BlockPolicy.Block10Minutes;
+            list.FileCheckInterval = TimeSpan.FromMinutes(1);
+
+            var a = await list.AcquireAsync(Site, CancellationToken.None);
+            list.ReportBlocked(a, Site);
+            await File.WriteAllLinesAsync(path, ["a.test:1", "c.test:1"]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+
+            clock.Now = start.AddSeconds(30);
+            Assert.AreEqual("b.test", await Next(list), "within FileCheckInterval the file is not read again");
+            clock.Now = start.AddSeconds(90);
+            Assert.AreEqual("c.test", await Next(list), "past FileCheckInterval: b is gone");
+
+            int BlockedSitesOfA() => list.Status().Single(s => s.Address.Host == "a.test").BlockedSites;
+            clock.Now = start.AddMinutes(9);
+            Assert.AreEqual(1, BlockedSitesOfA());
+            clock.Now = start.AddMinutes(11);
+            Assert.AreEqual(0, BlockedSitesOfA(), "Block10Minutes rests it 10 minutes, the default an hour");
         }
         finally
         {
@@ -807,6 +843,34 @@ public sealed class ProxyTests
     }
 
     [TestMethod]
+    public async Task UserAgents_FileCheckInterval_AppliesWhenSetAfterFromFile()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"z3l-agents-{Guid.NewGuid():N}.txt");
+        try
+        {
+            await File.WriteAllLinesAsync(path, ["UA-1", "UA-2"]);
+            var clock = new ManualClock();
+            var start = clock.Now;
+            var list = UserAgentList.FromFile(path);
+            list.Clock = clock;
+            list.FileCheckInterval = TimeSpan.FromMinutes(1);
+            Assert.AreEqual("UA-1", list.Next());
+
+            await File.WriteAllLinesAsync(path, ["UA-3"]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+            clock.Now = start.AddSeconds(30);
+            Assert.AreEqual("UA-2", list.Next(), "within FileCheckInterval the file is not read again");
+            clock.Now = start.AddSeconds(90);
+            Assert.AreEqual("UA-3", list.Next());
+            Assert.AreEqual(1, list.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
     [DataRow("a\nb\r\n\n# c", new[] { "a", "b", "", "# c" })]
     [DataRow("  [\"a\", 1, \"b\"]", new[] { "a", "b" })]
     [DataRow("[not json", new[] { "[not json" })]
@@ -822,7 +886,7 @@ public sealed class ProxyTests
         await using var first = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
         await using var second = await FakeProxy.StartAsync(200, "<html><body>ok</body></html>");
         var clock = new ManualClock();
-        var proxies = new ProxyList([first.Address, second.Address], ProxyBlockPolicy.Block10Minutes) { Clock = clock };
+        var proxies = new ProxyList([first.Address, second.Address], BlockPolicy.Block10Minutes) { Clock = clock };
         using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies, UserAgents = new UserAgentList(["UA-1", "UA-2", "UA-3"]) });
 
         async Task<PageResponse> Load(int i, bool blocked = false)

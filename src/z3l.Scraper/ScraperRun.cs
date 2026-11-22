@@ -61,7 +61,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     private readonly HostThrottle _throttle;
     private readonly RobotsCache? _robots;
     private readonly ICachingPageLoader? _cache;
-    private readonly ISnapshotPageLoader? _snapshots;
+    private readonly ISnapshotStore? _snapshots;
     private readonly string? _statePath;
     private readonly StateDataCodec? _codec;
     private readonly SemaphoreSlim _saveLock = new(1, 1);
@@ -111,7 +111,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
             _robots = new RobotsCache(scraper.Loader, _options, scraper.Logger, _stop.Token);
         }
         _cache = scraper.CachingPageLoader;
-        _snapshots = scraper.SnapshotPageLoader;
+        _snapshots = scraper.SnapshotStore;
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath) ? null : _options.StatePath;
         if (_statePath != null) _codec = new StateDataCodec(scraper.FindRoute, _options.StateJson);
         _queueLoaders = [.. scraper.Loaders.OfType<IQueuePageLoader>()];
@@ -358,7 +358,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         Stats.AddEnqueued();        // accepted and failed at once, so Pending stays right
         _metrics?.Enqueued(request.Label);
         Note(new Trouble(ReasonKind.BadUrl, "not an absolute http(s) URL", request.Url), request, failed: true);
-        RecordFailure(new FailedRequest(request, FailureReason.BadUrl, $"not an absolute http(s) URL: \"{request.Url}\"", null, null));
+        RecordFailure(new FailedRequest { Request = request, Reason = FailureReason.BadUrl, Message = $"not an absolute http(s) URL: \"{request.Url}\"" });
         return false;
     }
 
@@ -963,7 +963,8 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         if (_snapshots == null || response == null) return;
         try
         {
-            await _snapshots.SaveAsync(new PageSnapshot(request, response, kind, reason, exception, fromCache), token).ConfigureAwait(false);
+            var snapshot = new PageSnapshot { Request = request, Response = response, Kind = kind, Reason = reason, Exception = exception, FromCache = fromCache };
+            await _snapshots.SaveAsync(snapshot, token).ConfigureAwait(false);
         }
         catch (Exception ex) when (!token.IsCancellationRequested)
         {
@@ -1093,7 +1094,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
 
     private void Fail(ScrapeRequest request, FailureReason reason, string message, int? status, Exception? error)
     {
-        RecordFailure(new FailedRequest(request, reason, message, status, error));
+        RecordFailure(new FailedRequest { Request = request, Reason = reason, Message = message, StatusCode = status, Exception = error });
         ForgetFailed(request, reason);
         Finish();
     }

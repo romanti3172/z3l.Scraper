@@ -8,21 +8,6 @@ using z3l.Scraper.Diagnostics;
 
 namespace z3l.Scraper.Loading;
 
-/// <summary>What happens to a proxy when a site blocks it. The block is for that site only: other sites keep using the proxy.</summary>
-public enum ProxyBlockPolicy
-{
-    /// <summary>Blocks are counted, the proxy keeps working.</summary>
-    Ignore,
-    /// <summary>The proxy rests 10 minutes for that site.</summary>
-    Block10Minutes,
-    /// <summary>The proxy rests an hour for that site. The default.</summary>
-    Block1Hour,
-    /// <summary>The proxy rests a day for that site.</summary>
-    Block1Day,
-    /// <summary>The proxy is not used for that site again while the list lives.</summary>
-    Remove,
-}
-
 /// <summary>
 /// A proxy: scheme (http, https, socks4, socks4a, socks5), host, port and an optional login. <c>https</c> is TLS to the proxy
 /// itself; a plain http proxy that tunnels https pages with CONNECT (what proxy sellers call an "HTTPS proxy") is <c>http</c>.
@@ -137,31 +122,55 @@ public sealed partial record ProxyAddress(string Scheme, string Host, int Port, 
 }
 
 /// <summary>State of one proxy, for logs and dashboards.</summary>
-/// <param name="Address">The proxy.</param>
-/// <param name="Loads">Loads given to it.</param>
-/// <param name="Successes">Loads that got an answer.</param>
-/// <param name="Failures">Loads that failed in the proxy (no connection, 407...).</param>
-/// <param name="Blocks">Answers that sites blocked.</param>
-/// <param name="Dead">Resting after failures in a row.</param>
-/// <param name="BlockedSites">Sites it rests for now (blocked, or bad responses in a row).</param>
-/// <param name="BadResponses">Answers that were not the page (its own page, a cut-off one...).</param>
-/// <param name="Sessions">Sessions of loaders open on it now (see <see cref="BlockAwarePageLoader"/>).</param>
-public sealed record ProxyStatus(ProxyAddress Address, long Loads, long Successes, long Failures, long Blocks, bool Dead, int BlockedSites,
-    long BadResponses = 0, int Sessions = 0);
+public sealed record ProxyStatus
+{
+    /// <summary>The proxy.</summary>
+    public required ProxyAddress Address { get; init; }
+
+    /// <summary>Loads given to it.</summary>
+    public required long Loads { get; init; }
+
+    /// <summary>Loads that got an answer.</summary>
+    public required long Successes { get; init; }
+
+    /// <summary>Loads that failed in the proxy (no connection, 407...).</summary>
+    public required long Failures { get; init; }
+
+    /// <summary>Answers that sites blocked.</summary>
+    public required long Blocks { get; init; }
+
+    /// <summary>Resting after failures in a row.</summary>
+    public required bool Dead { get; init; }
+
+    /// <summary>Sites it rests for now (blocked, or bad responses in a row).</summary>
+    public required int BlockedSites { get; init; }
+
+    /// <summary>Answers that were not the page (its own page, a cut-off one...).</summary>
+    public long BadResponses { get; init; }
+
+    /// <summary>Sessions of loaders open on it now (see <see cref="BlockAwarePageLoader"/>).</summary>
+    public int Sessions { get; init; }
+}
 
 /// <summary>
 /// Proxies for <see cref="HttpPageLoader"/>: given out in turn, put to rest for a site that blocks them
-/// (<see cref="ProxyBlockPolicy"/>), and for every site after <see cref="MaxConsecutiveFailures"/> failures in a row.
+/// (<see cref="BlockPolicy"/>), and for every site after <see cref="MaxConsecutiveFailures"/> failures in a row.
 /// One failure or bad response already puts a proxy after the clean ones for a while: it is taken only when no clean one is free.
 /// The loaders built on <see cref="BlockAwarePageLoader"/> open a session on a proxy (a client with its cookies and a user agent)
 /// and keep loading through it while it does well; a new session takes a proxy no other session uses when there is one.
 /// When every proxy rests for a site, a load waits for the first one to come back (the scraper's RequestTimeout limits the wait).
 /// Thread-safe.
+/// <para>
+/// The settings (<see cref="BlockPolicy"/>, <see cref="MaxConsecutiveFailures"/>, the pauses...) are read each time they are needed:
+/// a list from <see cref="FromFile"/> or <see cref="FromUrlAsync"/> is set after it is made, and a change applies from the next
+/// block, failure or check of the file on.
+/// </para>
 /// </summary>
 /// <example>
 /// <code>
 /// var proxies = ProxyList.FromFile("proxies.txt");                      // re-read when the file changes
 /// // or: await ProxyList.FromUrlAsync(new Uri("https://proxies.example/list.txt"));   // re-read every 5 minutes
+/// proxies.DeadProxyPause = TimeSpan.FromMinutes(30);
 /// using var loader = new HttpPageLoader(new HttpPageLoaderOptions { Proxies = proxies });
 /// </code>
 /// </example>
@@ -176,12 +185,12 @@ public sealed class ProxyList
 
     /// <summary>A list of proxy lines (see <see cref="ProxyAddress.TryParse"/>); bad lines are skipped.</summary>
     /// <exception cref="ArgumentException">No line is a proxy.</exception>
-    public ProxyList(IEnumerable<string> lines, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, ILogger? logger = null)
+    public ProxyList(IEnumerable<string> lines, BlockPolicy blockPolicy = BlockPolicy.Block1Hour, ILogger? logger = null)
         : this(null, lines, blockPolicy, logger)
     {
     }
 
-    private ProxyList(LineSource? source, IEnumerable<string> lines, ProxyBlockPolicy blockPolicy, ILogger? logger)
+    private ProxyList(LineSource? source, IEnumerable<string> lines, BlockPolicy blockPolicy, ILogger? logger)
     {
         ArgumentNullException.ThrowIfNull(lines);
         _source = source;
@@ -197,7 +206,7 @@ public sealed class ProxyList
     /// </summary>
     /// <exception cref="FileNotFoundException">No such file.</exception>
     /// <exception cref="ArgumentException">No line of the file is a proxy.</exception>
-    public static ProxyList FromFile(string path, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, ILogger? logger = null)
+    public static ProxyList FromFile(string path, BlockPolicy blockPolicy = BlockPolicy.Block1Hour, ILogger? logger = null)
     {
         var (source, lines) = LineSource.OpenFile(path, What, logger ?? NullLogger.Instance);
         return new ProxyList(source, lines, blockPolicy, logger);
@@ -216,7 +225,7 @@ public sealed class ProxyList
     /// <param name="cancellationToken">Cancels the first read.</param>
     /// <exception cref="HttpRequestException">The first read failed.</exception>
     /// <exception cref="ArgumentException">No line of the answer is a proxy.</exception>
-    public static async Task<ProxyList> FromUrlAsync(Uri url, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, TimeSpan? refreshInterval = null,
+    public static async Task<ProxyList> FromUrlAsync(Uri url, BlockPolicy blockPolicy = BlockPolicy.Block1Hour, TimeSpan? refreshInterval = null,
         HttpClient? httpClient = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (source, lines) = await LineSource.OpenUrlAsync(url, refreshInterval, httpClient, What, logger ?? NullLogger.Instance, cancellationToken).ConfigureAwait(false);
@@ -236,7 +245,7 @@ public sealed class ProxyList
     /// <param name="cancellationToken">Cancels the first read.</param>
     /// <exception cref="ArgumentException">No line of the first read is a proxy.</exception>
     public static async Task<ProxyList> FromSourceAsync(Func<CancellationToken, Task<IEnumerable<string>>> read, string name,
-        ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, TimeSpan? refreshInterval = null, ILogger? logger = null,
+        BlockPolicy blockPolicy = BlockPolicy.Block1Hour, TimeSpan? refreshInterval = null, ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(read);
@@ -247,26 +256,26 @@ public sealed class ProxyList
 
     private const string What = "Proxy list";
 
-    /// <summary>What happens to a proxy a site blocks.</summary>
-    public ProxyBlockPolicy BlockPolicy { get; }
+    /// <summary>What happens to a proxy a site blocks. An hour of rest for that site by default.</summary>
+    public BlockPolicy BlockPolicy { get; set; }
 
     /// <summary>Failures in a row (no connection, 407...) after which a proxy rests for every site.</summary>
-    public int MaxConsecutiveFailures { get; init; } = 3;
+    public int MaxConsecutiveFailures { get; set; } = 3;
 
     /// <summary>How long a failing proxy rests.</summary>
-    public TimeSpan DeadProxyPause { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan DeadProxyPause { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// Bad responses in a row (not the page: the proxy's own page, a cut-off one...) after which a proxy rests for that site.
     /// Counted per site, so a broken site does not take the proxies from the others.
     /// </summary>
-    public int MaxConsecutiveBadResponses { get; init; } = 3;
+    public int MaxConsecutiveBadResponses { get; set; } = 3;
 
     /// <summary>How long a proxy with bad responses in a row rests for the site.</summary>
-    public TimeSpan BadResponsePause { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan BadResponsePause { get; set; } = TimeSpan.FromMinutes(10);
 
-    /// <summary>How often the file is checked for changes.</summary>
-    public TimeSpan FileCheckInterval { get; init; } = TimeSpan.FromSeconds(5);
+    /// <summary>How often the file of <see cref="FromFile"/> is checked for changes.</summary>
+    public TimeSpan FileCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Time source; tests set a manual one before the first load.</summary>
     internal TimeProvider Clock { get; set; } = TimeProvider.System;
@@ -285,8 +294,18 @@ public sealed class ProxyList
         lock (_lock)
         {
             var now = Clock.GetUtcNow();
-            return [.. _entries.Select(e => new ProxyStatus(e.Address, e.Health.Loads, e.Health.Successes, e.Health.Failures, e.Health.Blocks,
-                e.Health.DeadUntil > now, e.Health.CountBlockedSites(now), e.Health.BadResponses, e.Health.Sessions))];
+            return [.. _entries.Select(e => new ProxyStatus
+            {
+                Address = e.Address,
+                Loads = e.Health.Loads,
+                Successes = e.Health.Successes,
+                Failures = e.Health.Failures,
+                Blocks = e.Health.Blocks,
+                Dead = e.Health.DeadUntil > now,
+                BlockedSites = e.Health.CountBlockedSites(now),
+                BadResponses = e.Health.BadResponses,
+                Sessions = e.Health.Sessions,
+            })];
         }
     }
 
@@ -308,7 +327,7 @@ public sealed class ProxyList
     /// </summary>
     /// <param name="site">Host of the page.</param>
     /// <param name="cancellationToken">Ends the wait.</param>
-    /// <exception cref="NonRetryableException">Every proxy is removed for the site (<see cref="ProxyBlockPolicy.Remove"/>).</exception>
+    /// <exception cref="NonRetryableException">Every proxy is removed for the site (<see cref="BlockPolicy.Remove"/>).</exception>
     public Task<Entry> AcquireAsync(string site, CancellationToken cancellationToken) => TakeAsync(site, session: false, cancellationToken);
 
     /// <summary>
@@ -340,7 +359,7 @@ public sealed class ProxyList
                 var next = _entries.Select(e => e.Health.BackAt(site)).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
                 if (next == DateTimeOffset.MaxValue)
                 {
-                    throw new NonRetryableException($"Every proxy is removed for {site} (ProxyBlockPolicy.Remove)");
+                    throw new NonRetryableException($"Every proxy is removed for {site} (BlockPolicy.Remove)");
                 }
                 wait = next - now;
                 if (_waitLogged.Add(site))

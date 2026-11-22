@@ -22,24 +22,37 @@ public enum SnapshotKind
     HandlerError,
 }
 
-/// <summary>A loaded page that was not taken, given to <see cref="ISnapshotPageLoader"/>.</summary>
-/// <param name="Request">The request; its <see cref="ScrapeRequest.Attempts"/> tells which attempt brought the page.</param>
-/// <param name="Response">The page. Copy what you keep: the scraper lets the page go when the call ends.</param>
-/// <param name="Kind">Why the page was not taken.</param>
-/// <param name="Reason">What the checks or the handler said.</param>
-/// <param name="Exception">What the handler threw, if it threw.</param>
-/// <param name="FromCache">The page came from <see cref="Scraper.CachingPageLoader"/>, not from the loader.</param>
-public sealed record PageSnapshot(ScrapeRequest Request, PageResponse Response, SnapshotKind Kind, string Reason, Exception? Exception, bool FromCache);
+/// <summary>A loaded page that was not taken, given to <see cref="ISnapshotStore"/>.</summary>
+public sealed record PageSnapshot
+{
+    /// <summary>The request; its <see cref="ScrapeRequest.Attempts"/> tells which attempt brought the page.</summary>
+    public required ScrapeRequest Request { get; init; }
+
+    /// <summary>The page. Copy what you keep: the scraper lets the page go when the call ends.</summary>
+    public required PageResponse Response { get; init; }
+
+    /// <summary>Why the page was not taken.</summary>
+    public required SnapshotKind Kind { get; init; }
+
+    /// <summary>What the checks or the handler said.</summary>
+    public required string Reason { get; init; }
+
+    /// <summary>What the handler threw, if it threw.</summary>
+    public Exception? Exception { get; init; }
+
+    /// <summary>The page came from <see cref="Scraper.CachingPageLoader"/>, not from the loader.</summary>
+    public required bool FromCache { get; init; }
+}
 
 /// <summary>
 /// Saves the loaded pages that were not taken (blocked, missing, broken, or those whose handler threw) to show what the site answered.
-/// Set one in <see cref="Scraper.SnapshotPageLoader"/>. <see cref="SnapshotPageLoader"/> saves them in a folder; implement this interface to
+/// Set one in <see cref="Scraper.SnapshotStore"/>. <see cref="SnapshotStore"/> saves them in a folder; implement this interface to
 /// save them elsewhere (a database...).
 /// <para>
-/// It is not the loader of a label: the scraper calls it for the pages of every loader. Called from several threads at once.
+/// The scraper calls it for the pages of every loader, whatever their label. Called from several threads at once.
 /// </para>
 /// </summary>
-public interface ISnapshotPageLoader
+public interface ISnapshotStore
 {
     /// <summary>
     /// A loaded page was not taken: save it, if you want to. Called for every such attempt, retries included; a load that brought no page

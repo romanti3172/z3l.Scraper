@@ -69,7 +69,7 @@ public sealed class RateLimitTests
         Assert.AreEqual(0, stats.Pending);
         CollectionAssert.AreEqual(new[]
         {
-            new ReasonCount(ReasonKind.RateLimited, "over the plan's limit", "default", "s.test", 2, 0, "over the plan's limit", Url),
+            ReasonTests.Group(ReasonKind.RateLimited, "over the plan's limit", "default", "s.test", 2, 0, "over the plan's limit", Url),
         }, stats.Reasons.ToArray());
         StringAssert.Contains(stats.ToString(), "2 retries, 0 blocked, 2 rate limited");
         StringAssert.Contains(stats.Reasons[0].ToString(), "2x rate limited: over the plan's limit (default, s.test)");
