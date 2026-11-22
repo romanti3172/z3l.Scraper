@@ -86,7 +86,7 @@ public sealed class ProxySessionTests
     }
 
     private static ProxyList List(ManualClock clock, params string[] hosts) =>
-        new(hosts.Select(h => $"{h}:1"), ProxyBlockPolicy.Block10Minutes) { Clock = clock };
+        new(hosts.Select(h => $"{h}:1"), BlockPolicy.Block10Minutes) { Clock = clock };
 
     private static string[] Hosts(int count) => [.. Enumerable.Range(1, count).Select(i => $"p{i}.test")];
 
@@ -508,7 +508,7 @@ public sealed class ProxySessionTests
     public async Task TheUserAgentOfASessionThrownAwayForABlock_RestsForThatSite()
     {
         var clock = new ManualClock();
-        var agents = new UserAgentList(["UA-1", "UA-2"]) { Clock = clock, BlockPolicy = ProxyBlockPolicy.Block10Minutes };
+        var agents = new UserAgentList(["UA-1", "UA-2"]) { Clock = clock, BlockPolicy = BlockPolicy.Block10Minutes };
         var loader = new FakeSessionLoader(List(clock, Hosts(10)), agents);
 
         async Task<string?> BlockedFirstLoadAsync(string site)

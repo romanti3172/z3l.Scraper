@@ -1,16 +1,16 @@
 namespace z3l.Scraper.Loading;
 
 /// <summary>How a list rests what it gives out (a proxy, a user agent): its block policy, failures and bad responses in a row, pauses.</summary>
-internal readonly record struct RestRules(ProxyBlockPolicy BlockPolicy, int MaxConsecutiveFailures, TimeSpan FailurePause,
+internal readonly record struct RestRules(BlockPolicy BlockPolicy, int MaxConsecutiveFailures, TimeSpan FailurePause,
     int MaxConsecutiveBadResponses, TimeSpan BadResponsePause)
 {
-    /// <summary>How long a block rests the item for the site; null for <see cref="ProxyBlockPolicy.Ignore"/>, MaxValue for Remove.</summary>
+    /// <summary>How long a block rests the item for the site; null for <see cref="BlockPolicy.Ignore"/>, MaxValue for Remove.</summary>
     public TimeSpan? BlockRest => BlockPolicy switch
     {
-        ProxyBlockPolicy.Block10Minutes => TimeSpan.FromMinutes(10),
-        ProxyBlockPolicy.Block1Hour => TimeSpan.FromHours(1),
-        ProxyBlockPolicy.Block1Day => TimeSpan.FromDays(1),
-        ProxyBlockPolicy.Remove => TimeSpan.MaxValue,
+        BlockPolicy.Block10Minutes => TimeSpan.FromMinutes(10),
+        BlockPolicy.Block1Hour => TimeSpan.FromHours(1),
+        BlockPolicy.Block1Day => TimeSpan.FromDays(1),
+        BlockPolicy.Remove => TimeSpan.MaxValue,
         _ => null,
     };
 }

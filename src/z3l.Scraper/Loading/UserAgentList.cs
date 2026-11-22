@@ -114,7 +114,7 @@ public sealed class UserAgentList
     }
 
     /// <summary>What happens to a user agent whose session a site blocked: it rests for that site. An hour by default.</summary>
-    public ProxyBlockPolicy BlockPolicy { get; set; } = ProxyBlockPolicy.Block1Hour;
+    public BlockPolicy BlockPolicy { get; set; } = BlockPolicy.Block1Hour;
 
     /// <summary>Bad responses in a row on a site after which a user agent rests for that site.</summary>
     public int MaxConsecutiveBadResponses { get; set; } = 3;

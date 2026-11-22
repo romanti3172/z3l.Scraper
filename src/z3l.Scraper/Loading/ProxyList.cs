@@ -8,21 +8,6 @@ using z3l.Scraper.Diagnostics;
 
 namespace z3l.Scraper.Loading;
 
-/// <summary>What happens to a proxy when a site blocks it. The block is for that site only: other sites keep using the proxy.</summary>
-public enum ProxyBlockPolicy
-{
-    /// <summary>Blocks are counted, the proxy keeps working.</summary>
-    Ignore,
-    /// <summary>The proxy rests 10 minutes for that site.</summary>
-    Block10Minutes,
-    /// <summary>The proxy rests an hour for that site. The default.</summary>
-    Block1Hour,
-    /// <summary>The proxy rests a day for that site.</summary>
-    Block1Day,
-    /// <summary>The proxy is not used for that site again while the list lives.</summary>
-    Remove,
-}
-
 /// <summary>
 /// A proxy: scheme (http, https, socks4, socks4a, socks5), host, port and an optional login. <c>https</c> is TLS to the proxy
 /// itself; a plain http proxy that tunnels https pages with CONNECT (what proxy sellers call an "HTTPS proxy") is <c>http</c>.
@@ -151,7 +136,7 @@ public sealed record ProxyStatus(ProxyAddress Address, long Loads, long Successe
 
 /// <summary>
 /// Proxies for <see cref="HttpPageLoader"/>: given out in turn, put to rest for a site that blocks them
-/// (<see cref="ProxyBlockPolicy"/>), and for every site after <see cref="MaxConsecutiveFailures"/> failures in a row.
+/// (<see cref="BlockPolicy"/>), and for every site after <see cref="MaxConsecutiveFailures"/> failures in a row.
 /// One failure or bad response already puts a proxy after the clean ones for a while: it is taken only when no clean one is free.
 /// The loaders built on <see cref="BlockAwarePageLoader"/> open a session on a proxy (a client with its cookies and a user agent)
 /// and keep loading through it while it does well; a new session takes a proxy no other session uses when there is one.
@@ -182,12 +167,12 @@ public sealed class ProxyList
 
     /// <summary>A list of proxy lines (see <see cref="ProxyAddress.TryParse"/>); bad lines are skipped.</summary>
     /// <exception cref="ArgumentException">No line is a proxy.</exception>
-    public ProxyList(IEnumerable<string> lines, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, ILogger? logger = null)
+    public ProxyList(IEnumerable<string> lines, BlockPolicy blockPolicy = BlockPolicy.Block1Hour, ILogger? logger = null)
         : this(null, lines, blockPolicy, logger)
     {
     }
 
-    private ProxyList(LineSource? source, IEnumerable<string> lines, ProxyBlockPolicy blockPolicy, ILogger? logger)
+    private ProxyList(LineSource? source, IEnumerable<string> lines, BlockPolicy blockPolicy, ILogger? logger)
     {
         ArgumentNullException.ThrowIfNull(lines);
         _source = source;
@@ -203,7 +188,7 @@ public sealed class ProxyList
     /// </summary>
     /// <exception cref="FileNotFoundException">No such file.</exception>
     /// <exception cref="ArgumentException">No line of the file is a proxy.</exception>
-    public static ProxyList FromFile(string path, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, ILogger? logger = null)
+    public static ProxyList FromFile(string path, BlockPolicy blockPolicy = BlockPolicy.Block1Hour, ILogger? logger = null)
     {
         var (source, lines) = LineSource.OpenFile(path, What, logger ?? NullLogger.Instance);
         return new ProxyList(source, lines, blockPolicy, logger);
@@ -222,7 +207,7 @@ public sealed class ProxyList
     /// <param name="cancellationToken">Cancels the first read.</param>
     /// <exception cref="HttpRequestException">The first read failed.</exception>
     /// <exception cref="ArgumentException">No line of the answer is a proxy.</exception>
-    public static async Task<ProxyList> FromUrlAsync(Uri url, ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, TimeSpan? refreshInterval = null,
+    public static async Task<ProxyList> FromUrlAsync(Uri url, BlockPolicy blockPolicy = BlockPolicy.Block1Hour, TimeSpan? refreshInterval = null,
         HttpClient? httpClient = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (source, lines) = await LineSource.OpenUrlAsync(url, refreshInterval, httpClient, What, logger ?? NullLogger.Instance, cancellationToken).ConfigureAwait(false);
@@ -242,7 +227,7 @@ public sealed class ProxyList
     /// <param name="cancellationToken">Cancels the first read.</param>
     /// <exception cref="ArgumentException">No line of the first read is a proxy.</exception>
     public static async Task<ProxyList> FromSourceAsync(Func<CancellationToken, Task<IEnumerable<string>>> read, string name,
-        ProxyBlockPolicy blockPolicy = ProxyBlockPolicy.Block1Hour, TimeSpan? refreshInterval = null, ILogger? logger = null,
+        BlockPolicy blockPolicy = BlockPolicy.Block1Hour, TimeSpan? refreshInterval = null, ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(read);
@@ -254,7 +239,7 @@ public sealed class ProxyList
     private const string What = "Proxy list";
 
     /// <summary>What happens to a proxy a site blocks. An hour of rest for that site by default.</summary>
-    public ProxyBlockPolicy BlockPolicy { get; set; }
+    public BlockPolicy BlockPolicy { get; set; }
 
     /// <summary>Failures in a row (no connection, 407...) after which a proxy rests for every site.</summary>
     public int MaxConsecutiveFailures { get; set; } = 3;
@@ -314,7 +299,7 @@ public sealed class ProxyList
     /// </summary>
     /// <param name="site">Host of the page.</param>
     /// <param name="cancellationToken">Ends the wait.</param>
-    /// <exception cref="NonRetryableException">Every proxy is removed for the site (<see cref="ProxyBlockPolicy.Remove"/>).</exception>
+    /// <exception cref="NonRetryableException">Every proxy is removed for the site (<see cref="BlockPolicy.Remove"/>).</exception>
     public Task<Entry> AcquireAsync(string site, CancellationToken cancellationToken) => TakeAsync(site, session: false, cancellationToken);
 
     /// <summary>
@@ -346,7 +331,7 @@ public sealed class ProxyList
                 var next = _entries.Select(e => e.Health.BackAt(site)).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
                 if (next == DateTimeOffset.MaxValue)
                 {
-                    throw new NonRetryableException($"Every proxy is removed for {site} (ProxyBlockPolicy.Remove)");
+                    throw new NonRetryableException($"Every proxy is removed for {site} (BlockPolicy.Remove)");
                 }
                 wait = next - now;
                 if (_waitLogged.Add(site))
