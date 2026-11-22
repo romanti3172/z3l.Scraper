@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- CI has both SDKs; locally only the runtimes that are installed can run the tests -->
-    <TargetFrameworks Condition="'$(CI)' == 'true'">net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(CI)' == 'true'">net10.0;net11.0</TargetFrameworks>
     <TargetFramework Condition="'$(CI)' != 'true'">net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>

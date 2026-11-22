@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>z3l.Scraper: web scraping engine for .NET</title>
-  <meta name="description" content="Block-aware web scraping engine for .NET 9 and 10: retries, block detection, per-host throttling and limits, crawl scope, robots.txt, sitemaps and runs that survive a crash; loaders for a headless browser and scraping APIs. HTML parsed with z3l.FastHtmlParser.">
+  <meta name="description" content="Block-aware web scraping engine for .NET 10 and 11: retries, block detection, per-host throttling and limits, crawl scope, robots.txt, sitemaps and runs that survive a crash; loaders for a headless browser and scraping APIs. HTML parsed with z3l.FastHtmlParser.">
   <meta property="og:title" content="z3l.Scraper: web scraping engine for .NET">
   <meta property="og:description" content="Scrape sites that fight back: blocks, 429s, cut-off pages and crashes are handled for you. You write what to take from a page.">
   <meta property="og:image" content="icon.svg">
@@ -28,7 +28,7 @@
 
 <main>
   <div class="wrap hero">
-    <div class="eyebrow">.NET 9 &amp; .NET 10 · Retries · Blocks · Throttling · robots.txt · Sitemaps · Resume</div>
+    <div class="eyebrow">.NET 10 &amp; .NET 11 · Retries · Blocks · Throttling · robots.txt · Sitemaps · Resume</div>
     <h1>Scrape sites that <span class="hl">fight back</span></h1>
     <p class="lead">z3l.Scraper is a crawling engine for .NET. You write what to take from a page; it deals with
       403s, captchas, 429s, cut-off pages, flaky servers and crashed runs.</p>
@@ -117,7 +117,7 @@
     <div class="wrap">
       <div class="section-head">
         <h2>Everything a crawl needs</h2>
-        <p>The engine is one package of about 5,000 lines of code, with tests for every case.</p>
+        <p>The engine is one package of about 6,000 lines of code, with tests for every case.</p>
       </div>
       <div class="features">
         <div class="feature">
@@ -162,8 +162,8 @@
         </div>
         <div class="feature">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V5M16 20v-7M2 20h20"/></svg></div>
-          <h3>Why pages failed</h3>
-          <p><code>Stats.Reasons</code> groups every retry and failure by kind, reason, label and host, most frequent first: <code>8711x blocked: marker "captcha" (Item, shop.com)</code>.</p>
+          <h3>Why pages failed, and how the run goes</h3>
+          <p><code>Stats.Reasons</code> groups every retry and failure by kind, reason, label and host, most frequent first: <code>8711x blocked: marker "captcha" (Item, shop.com)</code>. <code>PublishMetrics</code> and <code>PublishTraces</code> publish the counters of the run and a span per attempt for OpenTelemetry; off, they cost nothing.</p>
         </div>
       </div>
       <p class="honest"><b>What it is not.</b> The engine itself does not run JavaScript: pages built in the browser go through

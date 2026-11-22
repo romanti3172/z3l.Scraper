@@ -45,9 +45,51 @@ public sealed class StealthHttpPageLoaderTests
         Assert.AreEqual(options.UserAgent, values["User-Agent"]);
         Assert.AreEqual(server.Url("/catalog?page=2"), values["Referer"]);
         Assert.AreEqual("same-origin", values["Sec-Fetch-Site"]);
-        Assert.AreEqual("gzip, deflate, br", values["Accept-Encoding"]);
+#if NET11_0_OR_GREATER
+        Assert.AreEqual("gzip, deflate, br, zstd", values["Accept-Encoding"], "Chrome's: HttpClient decodes zstd since .NET 11");
+#else
+        Assert.AreEqual("gzip, deflate, br", values["Accept-Encoding"], "what HttpClient decodes before .NET 11");
+#endif
         Assert.AreEqual("de-DE,de;q=0.9", values["Accept-Language"], "a default header replaces the browser's in its place");
     }
+
+#if NET11_0_OR_GREATER
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task ZstdPage_IsDecoded_SinceItIsAnnounced()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(IPAddress.Loopback, 0));
+        await using var app = builder.Build();
+        app.MapGet("/", async (HttpContext http) =>
+        {
+            // a site sends zstd only to those who announce it
+            if (!http.Request.Headers.AcceptEncoding.ToString().Contains("zstd", StringComparison.Ordinal))
+            {
+                await Results.Text("<html><body>no zstd asked</body></html>", "text/html").ExecuteAsync(http);
+                return;
+            }
+            var compressed = new MemoryStream();
+            using (var zstd = new System.IO.Compression.ZstandardStream(compressed, System.IO.Compression.CompressionMode.Compress, leaveOpen: true))
+            {
+                zstd.Write(Encoding.UTF8.GetBytes("<html><body>a zstd page</body></html>"));
+            }
+            http.Response.ContentType = "text/html";
+            http.Response.Headers.ContentEncoding = "zstd";
+            await http.Response.Body.WriteAsync(compressed.ToArray());
+        });
+        await app.StartAsync();
+        var url = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First() + "/";
+
+        using var loader = new StealthHttpPageLoader();
+        var page = await loader.LoadAsync(new ScrapeRequest(url), CancellationToken.None);
+
+        Assert.AreEqual(200, page.StatusCode);
+        StringAssert.Contains(page.Text, "a zstd page");
+        await app.StopAsync();
+    }
+#endif
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
