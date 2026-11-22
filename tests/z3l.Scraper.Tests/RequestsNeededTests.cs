@@ -85,12 +85,21 @@ public sealed class RequestsNeededTests
         options.RequestsNeededBelow = 10;
         var rows = new Queue<int[]>([[0, 1, 2, 3, 4], [], [5, 6, 7]]);      // the second read finds nothing, the third finds new rows
         var calls = new ConcurrentQueue<(long Pending, int Given)>();
-        var scraper = ItemScraper(options, TimeSpan.FromMilliseconds(20));
+        // the pages of the first rows wait for the call that finds nothing (up to 10 s), so it comes while they are unfinished. Pages
+        // of 20 ms could be done before it on a busy machine: it would come with nothing left, and the run would end there
+        var dryCall = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loader = new DelegateLoader(async (r, token) =>
+        {
+            await Task.WhenAny(dryCall.Task, Task.Delay(TimeSpan.FromSeconds(10), token));
+            return PageResponse.FromText(200, r.Url, ScraperTests.Html("ok"));
+        });
+        var scraper = new Scraper(loader, options).Route("default", ctx => ctx.Emit(ctx.Request.Url));
         scraper.RequestsNeeded += e =>
         {
             var batch = rows.Count > 0 ? rows.Dequeue() : [];
             foreach (var n in batch) e.Add(Url(n));
             calls.Enqueue((e.Pending, batch.Length));
+            if (batch.Length == 0) dryCall.TrySetResult();
             return Task.CompletedTask;
         };
 
