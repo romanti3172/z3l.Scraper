@@ -156,6 +156,8 @@ public sealed record ProxyStatus
 /// Proxies for <see cref="HttpPageLoader"/>: given out in turn, put to rest for a site that blocks them
 /// (<see cref="BlockPolicy"/>), and for every site after <see cref="MaxConsecutiveFailures"/> failures in a row.
 /// One failure or bad response already puts a proxy after the clean ones for a while: it is taken only when no clean one is free.
+/// With <see cref="RestGrowth"/> over 1 every rest of a proxy is longer than the one before (up to <see cref="MaxRest"/>), and only
+/// good loads in a row make them shorter again: a proxy that fails again and again is used less and less.
 /// The loaders built on <see cref="BlockAwarePageLoader"/> open a session on a proxy (a client with its cookies and a user agent)
 /// and keep loading through it while it does well; a new session takes a proxy no other session uses when there is one.
 /// When every proxy rests for a site, a load waits for the first one to come back (the scraper's RequestTimeout limits the wait).
@@ -274,6 +276,22 @@ public sealed class ProxyList
     /// <summary>How long a proxy with bad responses in a row rests for the site.</summary>
     public TimeSpan BadResponsePause { get; set; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// How much longer every next rest of a proxy is: after failures in a row (for every site), and after a block or bad responses in a
+    /// row (for that site, counted apart). 3: a <see cref="DeadProxyPause"/> of 10 minutes, then 30, 90... up to <see cref="MaxRest"/>;
+    /// an hour of <see cref="BlockPolicy.Block1Hour"/>, then 3 hours, 9... Five good loads in a row make the next rest a step
+    /// shorter. 1, the default: rests don't grow.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">Less than 1.</exception>
+    public double RestGrowth
+    {
+        get;
+        set => field = value >= 1 ? value : throw new ArgumentOutOfRangeException(nameof(value), value, "RestGrowth is 1 or more");
+    } = 1;
+
+    /// <summary>The longest a grown rest gets (<see cref="RestGrowth"/>); a day by default. A longer rest by itself stays.</summary>
+    public TimeSpan MaxRest { get; set; } = TimeSpan.FromDays(1);
+
     /// <summary>How often the file of <see cref="FromFile"/> is checked for changes.</summary>
     public TimeSpan FileCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
@@ -286,7 +304,7 @@ public sealed class ProxyList
         get { lock (_lock) return _entries.Count; }
     }
 
-    private RestRules Rules => new(BlockPolicy, MaxConsecutiveFailures, DeadProxyPause, MaxConsecutiveBadResponses, BadResponsePause);
+    private RestRules Rules => new(BlockPolicy, MaxConsecutiveFailures, DeadProxyPause, MaxConsecutiveBadResponses, BadResponsePause, RestGrowth, MaxRest);
 
     /// <summary>State of every proxy.</summary>
     public IReadOnlyList<ProxyStatus> Status()
@@ -421,11 +439,11 @@ public sealed class ProxyList
     {
         ArgumentNullException.ThrowIfNull(entry);
         CountResult("failure");
-        bool rests;
-        lock (_lock) rests = entry.Health.Failure(Clock.GetUtcNow(), Rules);
-        if (rests)
+        TimeSpan? rest;
+        lock (_lock) rest = entry.Health.Failure(Clock.GetUtcNow(), Rules);
+        if (rest != null)
         {
-            _logger.LogWarning("Proxy {Proxy} failed {Count} times in a row ({Reason}): it rests {Pause}", entry.Address, MaxConsecutiveFailures, reason, DeadProxyPause);
+            _logger.LogWarning("Proxy {Proxy} failed {Count} times in a row ({Reason}): it rests {Pause}", entry.Address, MaxConsecutiveFailures, reason, rest);
         }
     }
 
@@ -434,9 +452,9 @@ public sealed class ProxyList
     {
         ArgumentNullException.ThrowIfNull(entry);
         CountResult("blocked");
-        bool rests;
-        lock (_lock) rests = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
-        if (rests) _logger.LogInformation("Proxy {Proxy} is blocked on {Site}: {Policy}", entry.Address, site, BlockPolicy);
+        TimeSpan? rest;
+        lock (_lock) rest = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
+        if (rest != null) _logger.LogInformation("Proxy {Proxy} is blocked on {Site}: {Policy}, it rests {Pause}", entry.Address, site, BlockPolicy, rest);
     }
 
     /// <summary>
@@ -449,12 +467,12 @@ public sealed class ProxyList
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(site);
         CountResult("bad_response");
-        bool rests;
-        lock (_lock) rests = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
-        if (rests)
+        TimeSpan? rest;
+        lock (_lock) rest = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
+        if (rest != null)
         {
             _logger.LogInformation("Proxy {Proxy} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
-                entry.Address, MaxConsecutiveBadResponses, site, reason, BadResponsePause);
+                entry.Address, MaxConsecutiveBadResponses, site, reason, rest);
         }
     }
 

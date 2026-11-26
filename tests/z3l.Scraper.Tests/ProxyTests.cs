@@ -253,6 +253,115 @@ public sealed class ProxyTests
         Assert.AreEqual("b.test", await Next(list));
     }
 
+    // ------------------------------------------------------------------ growing rests
+
+    private static bool Dead(ProxyList list, string host) => list.Status().Single(s => s.Address.Host == host).Dead;
+
+    [TestMethod]
+    public async Task RestGrowth_EveryRestAfterFailuresIsLonger_UpToMaxRest()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1"])
+        {
+            Clock = clock, MaxConsecutiveFailures = 1, DeadProxyPause = TimeSpan.FromMinutes(10), RestGrowth = 3, MaxRest = TimeSpan.FromHours(1),
+        };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+
+        // 10 minutes, then 30, then 90 cut to the hour of MaxRest, and the hour again
+        foreach (var minutes in new[] { 10, 30, 60, 60 })
+        {
+            var start = clock.Now;
+            list.ReportFailure(a, "refused");
+            clock.Now = start.AddMinutes(minutes - 1);
+            Assert.IsTrue(Dead(list, "a.test"), $"rest of {minutes} minutes");
+            clock.Now = start.AddMinutes(minutes + 1);
+            Assert.IsFalse(Dead(list, "a.test"), $"rest of {minutes} minutes");
+        }
+    }
+
+    [TestMethod]
+    public async Task RestGrowth_FiveSuccessesInARowMakeTheNextRestAStepShorter_FewerDoNot()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1"])
+        {
+            Clock = clock, MaxConsecutiveFailures = 1, DeadProxyPause = TimeSpan.FromMinutes(10), RestGrowth = 3,
+        };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+        list.ReportFailure(a, "refused");                     // 10 minutes
+        clock.Now = clock.Now.AddMinutes(11);
+        list.ReportFailure(a, "refused");                     // 30 minutes
+        clock.Now = clock.Now.AddMinutes(31);
+
+        for (var i = 0; i < 4; i++) list.ReportSuccess(a);   // one short of forgiving: the next rest is 90 minutes
+        var start = clock.Now;
+        list.ReportFailure(a, "refused");
+        clock.Now = start.AddMinutes(89);
+        Assert.IsTrue(Dead(list, "a.test"));
+        clock.Now = start.AddMinutes(91);
+
+        for (var i = 0; i < 5; i++) list.ReportSuccess(a);   // forgives one rest: 90 minutes again, not 270
+        start = clock.Now;
+        list.ReportFailure(a, "refused");
+        clock.Now = start.AddMinutes(89);
+        Assert.IsTrue(Dead(list, "a.test"));
+        clock.Now = start.AddMinutes(91);
+        Assert.IsFalse(Dead(list, "a.test"));
+    }
+
+    [TestMethod]
+    public async Task RestGrowth_BlocksGrowForTheSite_OtherSitesCountApart_GoodResponsesForgive()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1"], BlockPolicy.Block1Hour) { Clock = clock, RestGrowth = 3 };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+
+        list.ReportBlocked(a, Site);                          // an hour
+        clock.Now = clock.Now.AddMinutes(61);
+        var start = clock.Now;
+        list.ReportBlocked(a, Site);                          // 3 hours
+        list.ReportBlocked(a, "other.test");                  // the first block there: an hour
+        clock.Now = start.AddMinutes(61);
+        CollectionAssert.Contains(new[] { await Next(list, "other.test"), await Next(list, "other.test") }, "a.test");
+        Assert.AreEqual("b.test", await Next(list));
+        Assert.AreEqual("b.test", await Next(list));
+        clock.Now = start.AddMinutes(181);
+        CollectionAssert.Contains(new[] { await Next(list), await Next(list) }, "a.test");
+
+        for (var i = 0; i < 5; i++) list.ReportGoodResponse(a, Site);   // forgives one: 3 hours again, not 9
+        start = clock.Now;
+        list.ReportBlocked(a, Site);
+        clock.Now = start.AddMinutes(181);
+        CollectionAssert.Contains(new[] { await Next(list), await Next(list) }, "a.test");
+    }
+
+    [TestMethod]
+    public async Task RestGrowth_BadResponsesInARowGrowTheRestForTheSite()
+    {
+        var clock = new ManualClock();
+        var list = new ProxyList(["a.test:1", "b.test:1"])
+        {
+            Clock = clock, MaxConsecutiveBadResponses = 1, BadResponsePause = TimeSpan.FromMinutes(10), RestGrowth = 2,
+        };
+        var a = await list.AcquireAsync(Site, CancellationToken.None);
+        list.ReportBadResponse(a, Site, "no marker");         // 10 minutes
+        clock.Now = clock.Now.AddMinutes(11);
+        var start = clock.Now;
+        list.ReportBadResponse(a, Site, "no marker");         // 20 minutes
+        clock.Now = start.AddMinutes(19);
+        Assert.AreEqual(1, list.Status().Single(s => s.Address.Host == "a.test").BlockedSites);
+        clock.Now = start.AddMinutes(21);
+        Assert.AreEqual(0, list.Status().Single(s => s.Address.Host == "a.test").BlockedSites);
+    }
+
+    [TestMethod]
+    public void RestGrowth_LessThanOne_Throws()
+    {
+        var list = new ProxyList(["a.test:1"]);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => list.RestGrowth = 0.5);
+        Assert.AreEqual(1, list.RestGrowth);
+    }
+
     [TestMethod]
     [Timeout(10_000, CooperativeCancellation = true)]
     public async Task EveryProxyResting_TheLoadWaitsForTheFirstToComeBack()
