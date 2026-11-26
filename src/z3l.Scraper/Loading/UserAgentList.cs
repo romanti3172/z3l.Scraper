@@ -255,21 +255,21 @@ public sealed class UserAgentList
     internal void ReportBlocked(Entry entry, string site)
     {
         CountResult("blocked");
-        bool rests;
-        lock (_lock) rests = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
-        if (rests) _logger.LogInformation("User agent {UserAgent} is blocked on {Site}: {Policy}", entry.UserAgent, site, BlockPolicy);
+        TimeSpan? rest;
+        lock (_lock) rest = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
+        if (rest != null) _logger.LogInformation("User agent {UserAgent} is blocked on {Site}: {Policy}", entry.UserAgent, site, BlockPolicy);
     }
 
     /// <summary>An answer with the user agent was not the page of the site: as <see cref="ProxyList.ReportBadResponse"/>.</summary>
     internal void ReportBadResponse(Entry entry, string site, string reason)
     {
         CountResult("bad_response");
-        bool rests;
-        lock (_lock) rests = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
-        if (rests)
+        TimeSpan? rest;
+        lock (_lock) rest = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
+        if (rest != null)
         {
             _logger.LogInformation("User agent {UserAgent} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
-                entry.UserAgent, MaxConsecutiveBadResponses, site, reason, BadResponsePause);
+                entry.UserAgent, MaxConsecutiveBadResponses, site, reason, rest);
         }
     }
 

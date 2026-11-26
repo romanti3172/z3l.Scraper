@@ -358,7 +358,11 @@ After
 `MaxConsecutiveFailures` (3) failures in a row a proxy rests for every site for `DeadProxyPause` (10 min); after
 `MaxConsecutiveBadResponses` (3) bad responses in a row on a site it rests for that site for `BadResponsePause` (10 min).
 An error older than its pause is forgotten, a good page starts the count again. Bad responses are counted per site, so a
-broken site does not take the proxies from the others; 429 and 503 are left to the throttling. When every proxy rests for a site, its loads wait for the first one to come back,
+broken site does not take the proxies from the others; 429 and 503 are left to the throttling.
+With `RestGrowth` over 1 (it is 1 by default) the rests grow: `proxies.RestGrowth = 3` makes the rests after failures
+10 minutes, then 30, 90... and the blocks of `Block1Hour` an hour, then 3 hours, 9... (per site), up to `MaxRest` (a day);
+five good loads in a row make the next rest a step shorter, so a proxy that keeps failing is used less and less.
+When every proxy rests for a site, its loads wait for the first one to come back,
 no longer than `RequestTimeout`. The file is read again when it changes (checked every `FileCheckInterval`, 5 s); proxies
 that stay keep their rests. The settings of a list from a file or a URL are set after it is made, and a change applies
 from the next block or failure on: `proxies.DeadProxyPause = TimeSpan.FromMinutes(30);`.
