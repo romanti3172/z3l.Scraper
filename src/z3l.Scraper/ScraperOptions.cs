@@ -24,8 +24,9 @@ public sealed class ScraperOptions
     public int MaxRetries { get; set; } = 5;
 
     /// <summary>
-    /// Retries of a page that looks missing (404, 410, a custom NotFound verdict): sites sometimes answer 404 by mistake. A page with
-    /// a not found marker (<see cref="Validation.ResponseRules.NotFoundMarkers"/>) is sure and fails at once.
+    /// Retries of a page that answered a bare status 404 or 410: sites and proxies sometimes answer 404 by mistake. A not found marker
+    /// (<see cref="Validation.ResponseRules.NotFoundMarkers"/>) or a <see cref="Validation.ValidationResult.NotFound"/> verdict of a
+    /// custom check is sure: the page fails at once.
     /// </summary>
     public int NotFoundRetries { get; set; } = 1;
 

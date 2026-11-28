@@ -20,10 +20,10 @@ internal static class ResponseValidator
         {
             if (FindAny(text, rules.BlockedMarkers) is { } blocked) return ValidationResult.Blocked($"marker \"{blocked}\"");
             // the site itself says the page is not there: sure, not retried (a bare 404 may be a mistake of the site or the proxy)
-            if (FindAny(text, rules.NotFoundMarkers) is { } notFound) return ValidationResult.NotFound($"marker \"{notFound}\"", final: true);
+            if (FindAny(text, rules.NotFoundMarkers) is { } notFound) return ValidationResult.NotFound($"marker \"{notFound}\"");
         }
 
-        if (rules.NotFoundOnStatus404 && status is 404 or 410) return ValidationResult.NotFound($"status {status}");
+        if (rules.NotFoundOnStatus404 && status is 404 or 410) return ValidationResult.NotFoundStatus($"status {status}");
 
         if (rules.RequireSuccessStatus && !response.IsSuccessStatusCode) return ValidationResult.Retry($"status {status}");
 

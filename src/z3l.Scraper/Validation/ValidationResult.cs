@@ -25,12 +25,14 @@ public readonly record struct ValidationResult(ValidationOutcome Outcome, string
     /// <summary>The response was blocked.</summary>
     public static ValidationResult Blocked(string reason) => new(ValidationOutcome.Blocked, reason);
 
-    /// <summary>The page does not exist; retried <see cref="ScraperOptions.NotFoundRetries"/> times (sites sometimes answer 404 by mistake).</summary>
-    public static ValidationResult NotFound(string reason) => new(ValidationOutcome.NotFound, reason);
+    /// <summary>
+    /// The page does not exist: it fails at once, without <see cref="ScraperOptions.NotFoundRetries"/> (those are for a bare status 404 or 410).
+    /// </summary>
+    public static ValidationResult NotFound(string reason) => new(ValidationOutcome.NotFound, reason) { Final = true };
 
-    /// <summary>The page does not exist; with <paramref name="final"/> it fails at once, without the not found retries.</summary>
-    public static ValidationResult NotFound(string reason, bool final) => new(ValidationOutcome.NotFound, reason) { Final = final };
+    /// <summary>Status 404 or 410 alone: retried <see cref="ScraperOptions.NotFoundRetries"/> times, sites and proxies answer 404 by mistake.</summary>
+    internal static ValidationResult NotFoundStatus(string reason) => new(ValidationOutcome.NotFound, reason);
 
-    /// <summary>A not found verdict that is sure (a not found marker on the page): no retries.</summary>
-    public bool Final { get; init; }
+    /// <summary>A sure not found verdict (anything but a bare status 404 or 410): the page fails at once.</summary>
+    public bool Final { get; private init; }
 }

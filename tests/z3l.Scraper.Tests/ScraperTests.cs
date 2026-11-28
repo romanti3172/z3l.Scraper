@@ -179,7 +179,7 @@ public sealed class ScraperTests
     }
 
     [TestMethod]
-    public async Task NotFound_CustomVerdict_KeepsTheRetries()
+    public async Task NotFound_CustomVerdict_FailsAtOnce()
     {
         var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
         var options = FastOptions();
@@ -189,7 +189,7 @@ public sealed class ScraperTests
 
         var result = await scraper.RunToListAsync("https://s.test/a");
 
-        Assert.AreEqual(3, result.Stats.Loads);
+        Assert.AreEqual(1, result.Stats.Loads);
         Assert.AreEqual(FailureReason.NotFound, result.Failed[0].Reason);
     }
 
