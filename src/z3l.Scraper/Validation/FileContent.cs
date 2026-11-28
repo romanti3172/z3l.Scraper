@@ -60,6 +60,10 @@ public static class FileContent
         return $"text instead of a file: \"{Shorten(text)}\"";
     }
 
+    /// <summary>The body is text, not a file: a page of a proxy or an error of the site (SVG counts as text here).</summary>
+    internal static bool IsText(ReadOnlySpan<byte> body) =>
+        body.Length > 0 && !body.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xD8, 0xFF]) && LooksLikeText(body);
+
     private static ReadOnlySpan<byte> Tail(ReadOnlySpan<byte> body, int length) => body[Math.Max(0, body.Length - length)..];
 
     /// <summary>The first bytes are text: no zero bytes, and under 5% control characters other than tabs and line breaks.</summary>

@@ -290,9 +290,9 @@ Checks run in this order; the first that matches decides:
 
 | Check | Verdict | What happens |
 |---|---|---|
-| status in `BlockedStatusCodes` (403, 429) | Blocked | the loader is told, the host slows down, retried |
-| a `BlockedMarkers` string, whatever the status | Blocked | as above |
-| a `NotFoundMarkers` string | NotFound | failed at once: the site says the page is not there |
+| a `BlockedMarkers` string, whatever the status | Blocked | the loader is told, the host slows down, retried |
+| a `NotFoundMarkers` string, whatever the status | NotFound | failed at once: the site says the page is not there (S3 answers a missing file with 403 `AccessDenied`) |
+| status in `BlockedStatusCodes` (403, 429) | Blocked | as a block marker |
 | status 404 / 410 | NotFound | retried `NotFoundRetries` times (1), then failed |
 | `ValidationResult.NotFound` from `Custom` | NotFound | failed at once, as a marker |
 | any other non-2xx status | Retry | retried up to `MaxRetries` (5), then failed |
@@ -305,7 +305,8 @@ A binary body (`File` pages) must look like a file: proxies answer 200 with a pa
 PNG, GIF, WebP and PDF are checked from their first bytes to their end marker, AVIF/HEIC, BMP, ICO, ZIP and SVG by their
 first bytes, and text that is not SVG (HTML, JSON, a plain error) is retried; a format it does not know passes. For files
 that are text, turn it off: `options.Rules[PageType.File].CheckFileContent = false`. `FileContent.Problem(bytes)` is the
-same check for files you have.
+same check for files you have. The markers (`BlockedMarkers`, `NotFoundMarkers`) are looked for in a file only when it came as
+text: `options.Rules[PageType.File].NotFoundMarkers.Add("<Code>AccessDenied</Code>")` fails a file S3 does not have at once.
 
 String checks ignore case. A blocked response or a 429 with `Retry-After` waits as long as the server asks
 (up to `MaxRetryDelay`), and so does a scraping service that sends one. Keep the reason of a custom check short and the
