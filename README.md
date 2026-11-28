@@ -292,7 +292,8 @@ Checks run in this order; the first that matches decides:
 |---|---|---|
 | status in `BlockedStatusCodes` (403, 429) | Blocked | the loader is told, the host slows down, retried |
 | a `BlockedMarkers` string, whatever the status | Blocked | as above |
-| a `NotFoundMarkers` string, or status 404 / 410 | NotFound | retried `NotFoundRetries` times (1), then failed |
+| a `NotFoundMarkers` string | NotFound | failed at once: the site says the page is not there |
+| status 404 / 410 | NotFound | retried `NotFoundRetries` times (1), then failed |
 | any other non-2xx status | Retry | retried up to `MaxRetries` (5), then failed |
 | empty body (except 204), wrong format, `MustContain`, `MustNotContain`, `Custom` | Retry | as above |
 | load error or timeout | Retry | as above |

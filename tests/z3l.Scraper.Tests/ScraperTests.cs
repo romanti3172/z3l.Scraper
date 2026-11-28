@@ -146,7 +146,7 @@ public sealed class ScraperTests
     }
 
     [TestMethod]
-    public async Task NotFound_ByStatusAndMarker_RetriedOnceThenFailed()
+    public async Task NotFound_ByStatusRetriedOnce_ByMarkerFailedAtOnce()
     {
         var loader = new FakeLoader()
             .Page("https://s.test/gone", Html("x"), 404)
@@ -159,8 +159,38 @@ public sealed class ScraperTests
 
         Assert.HasCount(2, result.Failed);
         Assert.IsTrue(result.Failed.All(f => f.Reason == FailureReason.NotFound));
-        Assert.AreEqual(4, result.Stats.Loads);   // NotFoundRetries = 1
+        Assert.AreEqual(3, result.Stats.Loads);   // the 404 twice (NotFoundRetries = 1), the marker once
         Assert.AreEqual(2, result.Stats.NotFound);
+    }
+
+    [TestMethod]
+    public async Task NotFound_MarkerFailsAtOnce_WhateverNotFoundRetries()
+    {
+        var loader = new FakeLoader().Page("https://s.test/removed", Html("Sorry, product not found"));
+        var options = FastOptions();
+        options.NotFoundRetries = 5;
+        options.Rules.Default.NotFoundMarkers.Add("product not found");
+        var scraper = new Scraper(loader, options).Route("default", _ => Assert.Fail("handler must not run"));
+
+        var result = await scraper.RunToListAsync("https://s.test/removed");
+
+        Assert.AreEqual(1, result.Stats.Loads);
+        Assert.AreEqual(FailureReason.NotFound, result.Failed[0].Reason);
+    }
+
+    [TestMethod]
+    public async Task NotFound_CustomVerdict_KeepsTheRetries()
+    {
+        var loader = new FakeLoader().Page("https://s.test/a", Html("x"));
+        var options = FastOptions();
+        options.NotFoundRetries = 2;
+        options.Rules.Default.Custom = (_, _, _) => ValidationResult.NotFound("custom");
+        var scraper = new Scraper(loader, options).Route("default", _ => Assert.Fail("handler must not run"));
+
+        var result = await scraper.RunToListAsync("https://s.test/a");
+
+        Assert.AreEqual(3, result.Stats.Loads);
+        Assert.AreEqual(FailureReason.NotFound, result.Failed[0].Reason);
     }
 
     [TestMethod]

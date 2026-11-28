@@ -25,6 +25,12 @@ public readonly record struct ValidationResult(ValidationOutcome Outcome, string
     /// <summary>The response was blocked.</summary>
     public static ValidationResult Blocked(string reason) => new(ValidationOutcome.Blocked, reason);
 
-    /// <summary>The page does not exist.</summary>
+    /// <summary>The page does not exist; retried <see cref="ScraperOptions.NotFoundRetries"/> times (sites sometimes answer 404 by mistake).</summary>
     public static ValidationResult NotFound(string reason) => new(ValidationOutcome.NotFound, reason);
+
+    /// <summary>The page does not exist; with <paramref name="final"/> it fails at once, without the not found retries.</summary>
+    public static ValidationResult NotFound(string reason, bool final) => new(ValidationOutcome.NotFound, reason) { Final = final };
+
+    /// <summary>A not found verdict that is sure (a not found marker on the page): no retries.</summary>
+    public bool Final { get; init; }
 }

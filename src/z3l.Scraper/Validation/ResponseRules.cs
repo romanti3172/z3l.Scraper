@@ -37,7 +37,10 @@ public sealed class ResponseRules
     /// <summary>The page is retried if it contains any of these strings.</summary>
     public List<string> MustNotContain { get; } = [];
 
-    /// <summary>The page does not exist if it contains any of these strings ("Product not found").</summary>
+    /// <summary>
+    /// The page does not exist if it contains any of these strings ("Product not found"): it fails at once, without
+    /// <see cref="ScraperOptions.NotFoundRetries"/>.
+    /// </summary>
     public List<string> NotFoundMarkers { get; } = [];
 
     /// <summary>
