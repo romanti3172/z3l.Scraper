@@ -454,7 +454,7 @@ public sealed class ProxyList
         CountResult("blocked");
         TimeSpan? rest;
         lock (_lock) rest = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
-        if (rest != null) _logger.LogInformation("Proxy {Proxy} is blocked on {Site}: {Policy}, it rests {Pause}", entry.Address, site, BlockPolicy, rest);
+        if (rest != null) _logger.LogDebug("Proxy {Proxy} is blocked on {Site}: {Policy}, it rests {Pause}", entry.Address, site, BlockPolicy, rest);
     }
 
     /// <summary>
@@ -471,7 +471,7 @@ public sealed class ProxyList
         lock (_lock) rest = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
         if (rest != null)
         {
-            _logger.LogInformation("Proxy {Proxy} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
+            _logger.LogDebug("Proxy {Proxy} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
                 entry.Address, MaxConsecutiveBadResponses, site, reason, rest);
         }
     }

@@ -25,6 +25,14 @@ public readonly record struct ValidationResult(ValidationOutcome Outcome, string
     /// <summary>The response was blocked.</summary>
     public static ValidationResult Blocked(string reason) => new(ValidationOutcome.Blocked, reason);
 
-    /// <summary>The page does not exist.</summary>
-    public static ValidationResult NotFound(string reason) => new(ValidationOutcome.NotFound, reason);
+    /// <summary>
+    /// The page does not exist: it fails at once, without <see cref="ScraperOptions.NotFoundRetries"/> (those are for a bare status 404 or 410).
+    /// </summary>
+    public static ValidationResult NotFound(string reason) => new(ValidationOutcome.NotFound, reason) { Final = true };
+
+    /// <summary>Status 404 or 410 alone: retried <see cref="ScraperOptions.NotFoundRetries"/> times, sites and proxies answer 404 by mistake.</summary>
+    internal static ValidationResult NotFoundStatus(string reason) => new(ValidationOutcome.NotFound, reason);
+
+    /// <summary>A sure not found verdict (anything but a bare status 404 or 410): the page fails at once.</summary>
+    public bool Final { get; private init; }
 }

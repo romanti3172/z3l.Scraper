@@ -698,8 +698,9 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 case ValidationOutcome.NotFound:
                     await SnapshotAsync(request, response, SnapshotKind.NotFound, verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
                     request.NotFoundCount++;
-                    Note(new Trouble(ReasonKind.NotFound, verdict.Reason!), request, failed: request.NotFoundCount > _options.NotFoundRetries);
-                    if (request.NotFoundCount <= _options.NotFoundRetries)
+                    var notFoundRetry = !verdict.Final && request.NotFoundCount <= _options.NotFoundRetries;
+                    Note(new Trouble(ReasonKind.NotFound, verdict.Reason!), request, failed: !notFoundRetry);
+                    if (notFoundRetry)
                     {
                         ScheduleRetry(request, verdict.Reason!, null, request.Attempts);
                     }

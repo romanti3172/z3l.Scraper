@@ -292,7 +292,9 @@ Checks run in this order; the first that matches decides:
 |---|---|---|
 | status in `BlockedStatusCodes` (403, 429) | Blocked | the loader is told, the host slows down, retried |
 | a `BlockedMarkers` string, whatever the status | Blocked | as above |
-| a `NotFoundMarkers` string, or status 404 / 410 | NotFound | retried `NotFoundRetries` times (1), then failed |
+| a `NotFoundMarkers` string | NotFound | failed at once: the site says the page is not there |
+| status 404 / 410 | NotFound | retried `NotFoundRetries` times (1), then failed |
+| `ValidationResult.NotFound` from `Custom` | NotFound | failed at once, as a marker |
 | any other non-2xx status | Retry | retried up to `MaxRetries` (5), then failed |
 | empty body (except 204), wrong format, `MustContain`, `MustNotContain`, `Custom` | Retry | as above |
 | load error or timeout | Retry | as above |
@@ -561,7 +563,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `UrlFilter` | none | which links found on pages are followed |
 | `IgnoredQueryParameters` | `utm_*`, `gclid`, `fbclid`, `yclid`... | dropped from URLs: links that differ only by them are one page |
 | `MaxRetries` | 5 | retries after the first attempt |
-| `NotFoundRetries` | 1 | retries of a page that looks missing |
+| `NotFoundRetries` | 1 | retries of a page that answered a bare 404 / 410 |
 | `RateLimitRetries` | 20 | retries of a page a scraping service refused for its limits, not counted in `MaxRetries` |
 | `RetryDelay`, `RetryBackoffFactor`, `MaxRetryDelay` | 1 s, ×2, 1 min | delay before retry *n* is `RetryDelay × factorⁿ⁻¹` ±20 % |
 | `RequestTimeout` | 2 min | a slower load is cancelled and retried |

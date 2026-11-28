@@ -257,7 +257,7 @@ public sealed class UserAgentList
         CountResult("blocked");
         TimeSpan? rest;
         lock (_lock) rest = entry.Health.Blocked(site, Clock.GetUtcNow(), Rules);
-        if (rest != null) _logger.LogInformation("User agent {UserAgent} is blocked on {Site}: {Policy}", entry.UserAgent, site, BlockPolicy);
+        if (rest != null) _logger.LogDebug("User agent {UserAgent} is blocked on {Site}: {Policy}", entry.UserAgent, site, BlockPolicy);
     }
 
     /// <summary>An answer with the user agent was not the page of the site: as <see cref="ProxyList.ReportBadResponse"/>.</summary>
@@ -268,7 +268,7 @@ public sealed class UserAgentList
         lock (_lock) rest = entry.Health.BadResponse(site, Clock.GetUtcNow(), Rules);
         if (rest != null)
         {
-            _logger.LogInformation("User agent {UserAgent} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
+            _logger.LogDebug("User agent {UserAgent} gave {Count} bad responses in a row on {Site} ({Reason}): it rests {Pause} for the site",
                 entry.UserAgent, MaxConsecutiveBadResponses, site, reason, rest);
         }
     }
