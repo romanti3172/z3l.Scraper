@@ -31,6 +31,10 @@ internal static class ResponseValidator
         {
             if (!rules.AllowEmptyBody && status != 204) return ValidationResult.Retry("empty body");
         }
+        else if (rules.Content == ExpectedContent.Binary)
+        {
+            if (rules.CheckFileContent && FileContent.Problem(response.Body) is { } problem) return ValidationResult.Retry(problem);
+        }
         else if (checkText)
         {
             switch (rules.Content)
