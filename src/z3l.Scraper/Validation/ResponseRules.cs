@@ -9,7 +9,10 @@ public enum ExpectedContent
     Html,
     /// <summary>A JSON object or array.</summary>
     Json,
-    /// <summary>A file (image, PDF...): the body is not decoded as text and text rules are skipped.</summary>
+    /// <summary>
+    /// A file (image, PDF...): the body is not decoded as text and text rules are skipped; it must look like a file, whole
+    /// (<see cref="ResponseRules.CheckFileContent"/>).
+    /// </summary>
     Binary,
 }
 
@@ -24,6 +27,12 @@ public sealed class ResponseRules
 
     /// <summary>Format of the body.</summary>
     public ExpectedContent? Content { get; set; }
+
+    /// <summary>
+    /// A <see cref="ExpectedContent.Binary"/> body must look like the file (<see cref="FileContent"/>): a page of a proxy instead of
+    /// it, or a cut-off file, is retried, and its loader hears of a bad response. On by default; turn it off for files that are text.
+    /// </summary>
+    public bool? CheckFileContent { get; set; }
 
     /// <summary>Accept an empty body.</summary>
     public bool? AllowEmptyBody { get; set; }
@@ -78,6 +87,7 @@ public sealed class ResponseRulesCollection
     {
         RequireSuccessStatus = true,
         Content = ExpectedContent.Any,
+        CheckFileContent = true,
         AllowEmptyBody = false,
         NotFoundOnStatus404 = true,
         BlockedStatusCodes = { 403, 429 },
@@ -117,6 +127,7 @@ public sealed class ResponseRulesCollection
         return new EffectiveRules(
             RequireSuccessStatus: own?.RequireSuccessStatus ?? d.RequireSuccessStatus ?? true,
             Content: own?.Content ?? ContentOfPageType(label) ?? d.Content ?? ExpectedContent.Any,
+            CheckFileContent: own?.CheckFileContent ?? d.CheckFileContent ?? true,
             AllowEmptyBody: own?.AllowEmptyBody ?? d.AllowEmptyBody ?? false,
             NotFoundOnStatus404: own?.NotFoundOnStatus404 ?? d.NotFoundOnStatus404 ?? true,
             MustContain: Merge(d.MustContain, own?.MustContain),
@@ -131,6 +142,7 @@ public sealed class ResponseRulesCollection
 internal sealed record EffectiveRules(
     bool RequireSuccessStatus,
     ExpectedContent Content,
+    bool CheckFileContent,
     bool AllowEmptyBody,
     bool NotFoundOnStatus404,
     string[] MustContain,

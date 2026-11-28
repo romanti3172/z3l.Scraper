@@ -205,6 +205,13 @@ public sealed class ScraperOptions
     public bool RetryOnHandlerError { get; set; }
 
     /// <summary>
+    /// A request with <see cref="ScrapeRequest.SavePath"/> whose file is there already (a run before saved it) gets the file as its
+    /// response instead of a load (<see cref="PageResponse.FromSavedFile"/>). The file goes through the response checks
+    /// (<see cref="Validation.ResponseRules.CheckFileContent"/>); a file that fails them is deleted and the page is loaded. On by default.
+    /// </summary>
+    public bool ReuseSavedFiles { get; set; } = true;
+
+    /// <summary>
     /// Handler errors in a row of one label on one host after which the run stops: the handler is broken (the site changed its pages, a
     /// selector finds nothing), and every next page of the label would be loaded only to fail. A handler error is any exception of the
     /// handler but <see cref="RetryRequestException"/> and <see cref="NonRetryableException"/>, each attempt counted

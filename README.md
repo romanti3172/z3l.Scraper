@@ -43,9 +43,9 @@ rotating proxies, rate and time limits, and streaming results while the scraping
 ## Install
 
 ```
-dotnet add package z3l.Scraper --prerelease
-dotnet add package z3l.Scraper.Playwright --prerelease            # pages in a headless browser
-dotnet add package z3l.Scraper.Loaders.ScrapingBee --prerelease   # pages through the ScrapingBee API
+dotnet add package z3l.Scraper
+dotnet add package z3l.Scraper.Playwright            # pages in a headless browser
+dotnet add package z3l.Scraper.Loaders.ScrapingBee   # pages through the ScrapingBee API
 ```
 
 ## Quick start
@@ -85,7 +85,7 @@ tracking parameters or by the order of the query (see [Crawl scope](#crawl-scope
 
 A label is a `PageType` or any string; both work everywhere a label is taken (`Route`, `Enqueue`, `ScrapeRequest`,
 `Rules[...]`), and labels ignore case. `PageType` has `Root`, `Category`, `Listing`, `Item`, `ItemDetails`, `Api`, `File`
-and `Sitemap`; `File` pages are checked as binary and `Api` pages as JSON unless their rules say otherwise.
+and `Sitemap`; `File` pages are checked as binary (a whole file, not a page of a proxy) and `Api` pages as JSON unless their rules say otherwise.
 
 A listing needs only its link. A page that already knows something about the pages it links to (a price, a rating,
 the category) passes it on as data, and the handler of that label gets it typed:
@@ -297,8 +297,15 @@ Checks run in this order; the first that matches decides:
 | `ValidationResult.NotFound` from `Custom` | NotFound | failed at once, as a marker |
 | any other non-2xx status | Retry | retried up to `MaxRetries` (5), then failed |
 | empty body (except 204), wrong format, `MustContain`, `MustNotContain`, `Custom` | Retry | as above |
+| a `File` (binary) body that is not the file: text, or cut off (`CheckFileContent`) | Retry | the loader hears of a bad response; as above |
 | load error or timeout | Retry | as above |
 | a scraping service refused the load for its limits ([remote loaders](#remote-loaders)) | Retry | no attempt spent, `RateLimitRetries` times (20); then as above |
+
+A binary body (`File` pages) must look like a file: proxies answer 200 with a page of their own or cut the file off. JPEG,
+PNG, GIF, WebP and PDF are checked from their first bytes to their end marker, AVIF/HEIC, BMP, ICO, ZIP and SVG by their
+first bytes, and text that is not SVG (HTML, JSON, a plain error) is retried; a format it does not know passes. For files
+that are text, turn it off: `options.Rules[PageType.File].CheckFileContent = false`. `FileContent.Problem(bytes)` is the
+same check for files you have.
 
 String checks ignore case. A blocked response or a 429 with `Retry-After` waits as long as the server asks
 (up to `MaxRetryDelay`), and so does a scraping service that sends one. Keep the reason of a custom check short and the
@@ -572,6 +579,7 @@ a Guid, a DateTime(Offset), a `JsonElement`) or the data of a typed handler, sav
 | `RespectRobotsTxt`, `RobotsUserAgent` | off, "z3l-scraper" | skip what robots.txt disallows, honour Crawl-delay |
 | `StatePath`, `StateSaveInterval`, `StateJson` | none, 30 s, none | save the run and continue it after a crash |
 | `RetryOnHandlerError` | false | retry when a handler throws |
+| `ReuseSavedFiles` | on | a request whose `SavePath` file is there gets it instead of a load ([saved files](#saved-files)) |
 | `MaxConsecutiveHandlerErrors` | none | stop the run when the handler of a label fails this many times in a row on a host |
 | `ItemBufferSize` | 1000 | items waiting for the consumer before workers wait |
 | `ProgressInterval` | 30 s | progress line in the log |
@@ -822,6 +830,26 @@ one for every such attempt. They go to `{Path}/{label}/{kind}`, the kind being `
 handler threw). A load that brought no page (a network error, a timeout) has no snapshot. `SnapshotStore` takes
 `Labels` and a `Filter` too (`snapshot => snapshot.Kind == SnapshotKind.Blocked`), and `MaxPerKind` (for each label and
 kind) and `MaxSnapshots` limit how many it saves; 0, the default, for no limit. Files of earlier runs stay.
+
+### Saved files
+
+A handler that saves its files (images, PDFs) names the file on the request, and a file a run before saved but did not use up
+(uploaded and deleted, say) is not loaded again:
+
+```csharp
+ctx.Enqueue(ScrapeRequest.For(imageUrl, PageType.File, item) with { SavePath = Path.Combine("images", name) });
+
+scraper.Route(PageType.File, async ctx =>
+{
+    if (!ctx.Response.FromSavedFile) await File.WriteAllBytesAsync(ctx.Request.SavePath!, ctx.Response.Body);
+    // ... upload it, delete it
+});
+```
+
+The file is given as a response of status 200 with `FromSavedFile`, like a page from the cache: it skips the host throttle,
+the rate limit and the loader, takes no attempt, and goes through the checks of its label (a whole file, not a page of a
+proxy: `CheckFileContent`). A file that fails them, or whose handler throws `RetryRequestException`, is deleted and the
+page is loaded. `Stats.FromSavedFiles` counts them; `ReuseSavedFiles = false` loads every page.
 
 To keep the pages elsewhere, in a database for example, override the storage and keep the labels, the filter and the
 limits of the classes (`ReadAsync`, `WriteAsync`, `DeleteAsync` and `CountStored` of `CachingPageLoader`, `WriteAsync` of

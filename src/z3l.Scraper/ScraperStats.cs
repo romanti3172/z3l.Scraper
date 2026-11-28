@@ -141,7 +141,7 @@ public sealed record ReasonCount
 public sealed class ScraperStats
 {
     private readonly Stopwatch _clock = new();
-    private long _enqueued, _duplicates, _skipped, _outOfScope, _restored, _loads, _fromCache, _succeeded, _failed, _notFound, _retries, _blocked,
+    private long _enqueued, _duplicates, _skipped, _outOfScope, _restored, _loads, _fromCache, _fromSavedFiles, _succeeded, _failed, _notFound, _retries, _blocked,
         _rateLimited, _items, _inProgress, _queued;
 
     /// <summary>
@@ -167,6 +167,11 @@ public sealed class ScraperStats
     /// (their requests were loaded then). Not counted in <see cref="Loads"/>.
     /// </summary>
     public long FromCache => Interlocked.Read(ref _fromCache);
+    /// <summary>
+    /// Files of <see cref="ScrapeRequest.SavePath"/> given instead of a load (<see cref="ScraperOptions.ReuseSavedFiles"/>), those that failed
+    /// the checks included (their requests were loaded then). Not counted in <see cref="Loads"/>.
+    /// </summary>
+    public long FromSavedFiles => Interlocked.Read(ref _fromSavedFiles);
     /// <summary>Requests whose page was handled.</summary>
     public long Succeeded => Interlocked.Read(ref _succeeded);
     /// <summary>Requests that failed (not found included).</summary>
@@ -273,6 +278,7 @@ public sealed class ScraperStats
     internal void AddRestored() => Interlocked.Increment(ref _restored);
     internal void AddLoad() => Interlocked.Increment(ref _loads);
     internal void AddFromCache() => Interlocked.Increment(ref _fromCache);
+    internal void AddFromSavedFile() => Interlocked.Increment(ref _fromSavedFiles);
     internal void AddSucceeded() => Interlocked.Increment(ref _succeeded);
     internal void AddFailed() => Interlocked.Increment(ref _failed);
     internal void AddNotFound() => Interlocked.Increment(ref _notFound);
@@ -292,7 +298,8 @@ public sealed class ScraperStats
         var skipped = (SkippedByLimit > 0 ? $", {SkippedByLimit} over limits" : string.Empty)
                       + (OutOfScope > 0 ? $", {OutOfScope} out of scope" : string.Empty)
                       + (Restored > 0 ? $", {Restored} restored" : string.Empty);
-        var cached = FromCache > 0 ? $", {FromCache} from cache" : string.Empty;
+        var cached = (FromCache > 0 ? $", {FromCache} from cache" : string.Empty)
+                     + (FromSavedFiles > 0 ? $", {FromSavedFiles} saved files" : string.Empty);
         var limited = RateLimited > 0 ? $", {RateLimited} rate limited" : string.Empty;
         return $"{Succeeded}/{Enqueued} done, {Failed} failed ({NotFound} not found), {Pending} pending " +
                $"({Queued} queued, {InProgress} in progress), {Loads} loads{cached}, {Retries} retries, {Blocked} blocked{limited}, " +

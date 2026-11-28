@@ -97,6 +97,14 @@ public sealed record ScrapeRequest
     public bool SkipDuplicateCheck { get; init; }
 
     /// <summary>
+    /// The file the handler saves this page to (an image, a PDF...). With <see cref="ScraperOptions.ReuseSavedFiles"/> a file already there
+    /// (saved by a run before and not used up yet) is given as the response instead of a load, with
+    /// <see cref="PageResponse.FromSavedFile"/>: it goes through the response checks and the handler as a loaded one, without an attempt
+    /// or a load slot. A file that fails the checks, or that the handler asks to retry, is deleted and the page is loaded.
+    /// </summary>
+    public string? SavePath { get; init; }
+
+    /// <summary>
     /// Number of load attempts made so far (1 in the first handler call). A load a scraping service refused for its limits is no
     /// attempt (<see cref="ScraperOptions.RateLimitRetries"/>).
     /// </summary>
@@ -122,6 +130,9 @@ public sealed record ScrapeRequest
 
     /// <summary><see cref="Scraper.CachingPageLoader"/> was asked for this request: its next loads go to the loader.</summary>
     internal bool SkipCache { get; set; }
+
+    /// <summary>The file of <see cref="SavePath"/> was tried for this request: its next loads go to the loader.</summary>
+    internal bool SkipSavedFile { get; set; }
 
     /// <summary>With a state file: items of this page the consumer has not taken yet; the page stays in the file until it is 0.</summary>
     internal int UnackedItems;

@@ -106,7 +106,8 @@ public sealed class RabbitMqTests
         try
         {
             await using var httpWorker = new Worker(broker, http, "http", new FuncLoader((r, _) =>
-                Task.FromResult(new PageResponse(200, r.Url, Encoding.ASCII.GetBytes("file " + r.Url), "application/octet-stream"))));
+                // a binary file: text instead of a file is retried (CheckFileContent)
+                Task.FromResult(new PageResponse(200, r.Url, [0, .. Encoding.ASCII.GetBytes("file " + r.Url)], "application/octet-stream"))));
             await using var browserWorker = new Worker(broker, browser, "browser", new FuncLoader((r, _) => Task.FromResult(r.Url.EndsWith("/list")
                 ? Page(r.Url, string.Concat(Enumerable.Range(0, 100).Select(i => $"<a class='p' href='/p/{i}'>p</a>"))
                               + string.Concat(Enumerable.Range(0, 10).Select(i => $"<a class='f' href='/f/{i}'>f</a>")))

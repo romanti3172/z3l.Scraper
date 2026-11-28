@@ -113,7 +113,7 @@ public sealed class LabelTests
     {
         var bodies = new Dictionary<string, (string Type, byte[] Body)>
         {
-            ["https://s.test/1.jpg"] = ("image/jpeg", [0xFF, 0xD8, 0xFF, 0xE0]),
+            ["https://s.test/1.jpg"] = ("image/jpeg", [0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9]),
             ["https://s.test/api/ok"] = ("application/json", "{\"ok\":true}"u8.ToArray()),
             ["https://s.test/api/html"] = ("text/html", "<html><body>login</body></html>"u8.ToArray()),
         };
@@ -129,7 +129,7 @@ public sealed class LabelTests
             new ScrapeRequest("https://s.test/api/ok", PageType.Api),
             new ScrapeRequest("https://s.test/api/html", PageType.Api));
 
-        CollectionAssert.AreEquivalent(new object[] { 4, "{\"ok\":true}" }, result.Items.ToArray());
+        CollectionAssert.AreEquivalent(new object[] { 6, "{\"ok\":true}" }, result.Items.ToArray());
         StringAssert.Contains(result.Failed.Single().Message, "not json");
     }
 
