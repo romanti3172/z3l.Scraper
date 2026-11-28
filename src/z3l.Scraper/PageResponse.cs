@@ -44,6 +44,12 @@ public sealed partial class PageResponse
     public static PageResponse FromText(int statusCode, string url, string text, string? contentType = null, IReadOnlyDictionary<string, string>? headers = null) =>
         new(statusCode, url, text ?? string.Empty, contentType, headers);
 
+    /// <summary>
+    /// The response is the file of <see cref="ScrapeRequest.SavePath"/> read from the disk (<see cref="ScraperOptions.ReuseSavedFiles"/>),
+    /// not a load: the handler has it saved already, and no loader heard of it.
+    /// </summary>
+    public bool FromSavedFile { get; internal init; }
+
     /// <summary>HTTP status code.</summary>
     public int StatusCode { get; }
 

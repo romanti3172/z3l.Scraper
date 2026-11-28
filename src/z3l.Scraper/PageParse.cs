@@ -44,7 +44,7 @@ internal sealed class PageParse : IScrapeHost
         if (parent != null && !_scope.Allows(uri)) return false;
 
         var depth = parent == null ? 0 : parent.Depth + 1;
-        request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false };
+        request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, Depth = depth, HasThrottleSlot = false, SkipCache = false, SkipSavedFile = false };
         KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey(uri));
         lock (_found)
         {
@@ -65,7 +65,7 @@ internal sealed class PageParse : IScrapeHost
         var route = scraper.RouteOf(request);
         var scope = new CrawlScope(scraper.Options);
         // own copy, as a run makes: the first attempt of the page, its URL without the ignored query parameters
-        request = request with { Url = scope.Clean(uri).AbsoluteUri, Attempts = 1, NotFoundCount = 0, HasThrottleSlot = false, SkipCache = false };
+        request = request with { Url = scope.Clean(uri).AbsoluteUri, Attempts = 1, NotFoundCount = 0, HasThrottleSlot = false, SkipCache = false, SkipSavedFile = false };
 
         response ??= await LoadAsync(scraper, request, token).ConfigureAwait(false);
         var verdict = ResponseValidator.Validate(request, response, scraper.Options.Rules.Build(request.Label));

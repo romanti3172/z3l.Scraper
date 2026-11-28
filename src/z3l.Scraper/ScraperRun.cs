@@ -248,7 +248,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         var depth = parent == null ? 0 : parent.Depth + 1;
         // own copy: the caller may reuse its instance
         request = request with { Url = uri.AbsoluteUri, Attempts = 0, NotFoundCount = 0, RateLimitCount = 0, Depth = depth, HasThrottleSlot = false,
-            SkipCache = false };
+            SkipCache = false, SkipSavedFile = false };
         // hashed before the lock: the SHA-256 of a long POST body takes a while. The key is made of the Uri above, not of the URL parsed again
         KeyHash? key = request.SkipDuplicateCheck ? null : KeyHash.Of(request.GetUniqueKey(uri));
 
@@ -555,7 +555,13 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         // a kept page needs no load: it skips the host's line and the rate limit. The cache is asked once per request (a request back
         // from its host's line asked on its way in), so the retries of a request go to its loader
         PageResponse? cached = null;
-        if (_cache != null && !request.SkipCache && !request.HasThrottleSlot)
+        // a file a run before saved for the request is given as such a page (ReuseSavedFiles), before the cache
+        if (_options.ReuseSavedFiles && request.SavePath != null && !request.SkipSavedFile && !request.HasThrottleSlot)
+        {
+            request.SkipSavedFile = true;
+            cached = await ReadSavedFileAsync(request, token).ConfigureAwait(false);
+        }
+        if (cached == null && _cache != null && !request.SkipCache && !request.HasThrottleSlot)
         {
             request.SkipCache = true;
             cached = await LoadFromCacheAsync(request, token).ConfigureAwait(false);
@@ -571,7 +577,11 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
         var loader = _scraper.LoaderFor(request.Label);
         var queued = loader is IQueuePageLoader;
         request.Attempts++;
-        if (fromCache)
+        if (cached?.FromSavedFile == true)
+        {
+            Stats.AddFromSavedFile();
+        }
+        else if (fromCache)
         {
             Stats.AddFromCache();
             _metrics?.CacheHit(request.Label);
@@ -599,7 +609,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                 {
                     // the kept page is not the page any more (the rules changed since it was kept): it was no attempt
                     await SnapshotAsync(request, response, KindOf(verdict.Outcome), verdict.Reason!, null, fromCache, token).ConfigureAwait(false);
-                    await LoadAgainAsync(request, $"the kept page failed the checks: {verdict.Reason}", token).ConfigureAwait(false);
+                    await LoadAgainAsync(request, response!, $"the kept page failed the checks: {verdict.Reason}", token).ConfigureAwait(false);
                     return;
                 }
             }
@@ -761,7 +771,7 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
                     if (fromCache)
                     {
                         // the handler does not want the kept page: it was no attempt
-                        await LoadAgainAsync(request, $"the handler asked to retry the kept page: {retry.Message}", token).ConfigureAwait(false);
+                        await LoadAgainAsync(request, response, $"the handler asked to retry the kept page: {retry.Message}", token).ConfigureAwait(false);
                         break;
                     }
                     if (retry.Blocked)
@@ -942,19 +952,54 @@ internal sealed class ScraperRun : IAsyncDisposable, IScrapeHost
     /// A page from the cache was not the page: the cache forgets it, and the request goes to its loader at once, as if the cache had not
     /// had it. The kept page was no attempt, so it takes no retry and waits for no retry delay.
     /// </summary>
-    private async Task LoadAgainAsync(ScrapeRequest request, string reason, CancellationToken token)
+    private async Task LoadAgainAsync(ScrapeRequest request, PageResponse kept, string reason, CancellationToken token)
     {
         Logger.LogDebug("{Url} is loaded again: {Reason}", request.Url, reason);
-        try
+        if (kept.FromSavedFile)
         {
-            await _cache!.RemoveAsync(request, token).ConfigureAwait(false);
+            // the saved file is not the file: it goes, so a run after this one does not take it either
+            try
+            {
+                File.Delete(request.SavePath!);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Logger.LogWarning(ex, "The saved file {Path} could not be deleted", request.SavePath);
+            }
         }
-        catch (Exception ex) when (!token.IsCancellationRequested)
+        else
         {
-            Logger.LogWarning(ex, "The cache could not forget {Url}", request.Url);
+            try
+            {
+                await _cache!.RemoveAsync(request, token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!token.IsCancellationRequested)
+            {
+                Logger.LogWarning(ex, "The cache could not forget {Url}", request.Url);
+            }
         }
         request.Attempts--;
         Push(request);
+    }
+
+    /// <summary>
+    /// The file of <see cref="ScrapeRequest.SavePath"/> as a response, or null when there is none; a file that cannot be read (being written,
+    /// deleted meanwhile) is logged at Debug and the request is loaded.
+    /// </summary>
+    private async Task<PageResponse?> ReadSavedFileAsync(ScrapeRequest request, CancellationToken token)
+    {
+        var path = request.SavePath!;
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var body = await File.ReadAllBytesAsync(path, token).ConfigureAwait(false);
+            return new PageResponse(200, request.Url, body) { FromSavedFile = true };
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Logger.LogDebug(ex, "The saved file {Path} could not be read: {Url} is loaded", path, request.Url);
+            return null;
+        }
     }
 
     /// <summary>Gives a page that was not taken to the snapshots; a load that brought no page has none.</summary>

@@ -202,6 +202,7 @@ internal static class RunState
         if (request.MaxRetries is { } maxRetries) writer.WriteNumber("maxRetries", maxRetries);
         if (request.UniqueKey != null) writer.WriteString("uniqueKey", request.UniqueKey);
         if (request.SkipDuplicateCheck) writer.WriteBoolean("skipDuplicateCheck", true);
+        if (request.SavePath != null) writer.WriteString("savePath", request.SavePath);
         if (request.Depth != 0) writer.WriteNumber("depth", request.Depth);
         if (request.ParentUrl != null) writer.WriteString("parentUrl", request.ParentUrl);
         if (request.Data != null)
@@ -227,6 +228,7 @@ internal static class RunState
             MaxRetries = item.TryGetProperty("maxRetries", out var maxRetries) ? maxRetries.GetInt32() : null,
             UniqueKey = item.TryGetProperty("uniqueKey", out var uniqueKey) ? uniqueKey.GetString() : null,
             SkipDuplicateCheck = item.TryGetProperty("skipDuplicateCheck", out var skip) && skip.GetBoolean(),
+            SavePath = item.TryGetProperty("savePath", out var savePath) ? savePath.GetString() : null,
             // "userData": files of 0.1.0-preview.3
             Data = item.TryGetProperty("data", out var data) || item.TryGetProperty("userData", out data) ? codec.Read(label, data) : null,
         };
